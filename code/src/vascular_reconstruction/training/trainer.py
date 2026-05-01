@@ -137,6 +137,9 @@ class Trainer:
             
             if i > 0 and i % self.config.save_interval == 0:
                 self.save_checkpoint(i)
+        
+        # Save final model
+        self.save_checkpoint(self.config.iterations)
 
     def save_checkpoint(self, iteration: int):
         path = Path(self.config.checkpoint_dir) / f"checkpoint_{iteration}.pt"
