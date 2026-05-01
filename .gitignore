@@ -7,6 +7,7 @@ __pycache__/
 .ruff_cache/
 .venv/
 venv/
+.venv310/
 
 # Build artifacts
 dist/
@@ -22,3 +23,6 @@ build/
 *.nii
 *.stl
 code/outputs/
+checkpoints/
+*.log
+visualization/*.png

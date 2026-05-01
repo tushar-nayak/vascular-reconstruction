@@ -51,7 +51,7 @@ class TrainingConfig(BaseConfig):
 class ModelConfig(BaseConfig):
     """Configuration for the hybrid PINN-GS model."""
 
-    num_gaussians: int = 100000
+    num_gaussians: int = 50000
     sh_degree: int = 3
     pinn_hidden_dim: int = 128
     pinn_num_layers: int = 4

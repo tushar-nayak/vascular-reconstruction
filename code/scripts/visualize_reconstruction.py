@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from vascular_reconstruction.models.pinn_gs import PINN_GS
+from vascular_reconstruction.config import ModelConfig
 
 
 def visualize_checkpoint(checkpoint_path: Path, output_dir: Path):
@@ -26,35 +27,42 @@ def visualize_checkpoint(checkpoint_path: Path, output_dir: Path):
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     
     # 2. Initialize Model
-    # Note: These configs should ideally match training
-    num_gaussians = 100000
+    # Try to determine num_gaussians from state_dict
+    state_dict = checkpoint['model_state_dict']
+    num_gaussians = state_dict['gs._xyz'].shape[0]
+    
     pinn_config = {"hidden_dim": 128, "num_layers": 4}
     model = PINN_GS(num_gaussians=num_gaussians, pinn_config=pinn_config)
     
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(state_dict)
     model.eval()
     
     # 3. Visualize Geometry (Gaussians)
     xyz = model.gs.get_xyz.detach().numpy()
-    opacity = model.gs.get_opacity.detach().numpy()
     
     fig = plt.figure(figsize=(15, 10))
     
     # 3D Point Cloud
     ax1 = fig.add_subplot(121, projection='3d')
-    # Use opacity for alpha if possible, or just plot a subset
-    idx = np.random.choice(len(xyz), min(5000, len(xyz)), replace=False)
-    ax1.scatter(xyz[idx, 0], xyz[idx, 1], xyz[idx, 2], c='red', s=1, alpha=0.5)
+    
+    # Plot a representative subset
+    idx = np.random.choice(len(xyz), min(10000, len(xyz)), replace=False)
+    ax1.scatter(xyz[idx, 0], xyz[idx, 1], xyz[idx, 2], c='red', s=0.5, alpha=0.3)
     ax1.set_title(f"Reconstructed Geometry (Iteration {checkpoint['iteration']})")
     ax1.set_xlabel("X")
     ax1.set_ylabel("Y")
     ax1.set_zlabel("Z")
     
+    # Set fixed limits based on vascular tree scale
+    ax1.set_xlim([-100, 100])
+    ax1.set_ylim([-100, 100])
+    ax1.set_zlim([-100, 100])
+    
     # 4. Visualize Flow Field (PINN)
-    # Create a grid to sample flow
-    x = np.linspace(-100, 100, 10)
-    y = np.linspace(-100, 100, 10)
-    z = np.linspace(-100, 100, 10)
+    # Create a grid to sample flow within the vessel volume
+    x = np.linspace(-60, 60, 10)
+    y = np.linspace(-60, 60, 10)
+    z = np.linspace(-60, 60, 10)
     xx, yy, zz = np.meshgrid(x, y, z)
     coords = np.stack([xx, yy, zz], axis=-1).reshape(-1, 3)
     
@@ -62,14 +70,20 @@ def visualize_checkpoint(checkpoint_path: Path, output_dir: Path):
     coords_torch = torch.from_numpy(coords).float()
     
     with torch.no_grad():
-        # pinn output: (u, v, w, p)
         flow_out = model.pinn(coords_torch[:, 0:1], coords_torch[:, 1:2], coords_torch[:, 2:3], t)
         u, v, w = flow_out[:, 0].numpy(), flow_out[:, 1].numpy(), flow_out[:, 2].numpy()
-        p = flow_out[:, 3].numpy()
         
     ax2 = fig.add_subplot(122, projection='3d')
-    ax2.quiver(coords[:, 0], coords[:, 1], coords[:, 2], u, v, w, length=10, normalize=True, cmap='jet')
+    # Filter for significant flow to reduce clutter
+    speed = np.sqrt(u**2 + v**2 + w**2)
+    mask = speed > 0.01
+    
+    ax2.quiver(coords[mask, 0], coords[mask, 1], coords[mask, 2], 
+               u[mask], v[mask], w[mask], length=5, normalize=True, cmap='jet')
     ax2.set_title("Neural Flow Field (PINN)")
+    ax2.set_xlim([-100, 100])
+    ax2.set_ylim([-100, 100])
+    ax2.set_zlim([-100, 100])
     
     plt.savefig(output_dir / f"reconstruction_iter_{checkpoint['iteration']}.png")
     print(f"Visualization saved to {output_dir}")

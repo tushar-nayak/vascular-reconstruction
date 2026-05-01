@@ -59,6 +59,6 @@ python code/scripts/visualize_reconstruction.py --checkpoint checkpoints/checkpo
 ## Current Status
 
 - **Dataset**: ~2,000 coronary trees processed; ~11,000 X-ray projections generated.
-- **Training**: Active (Run `hybrid_v2`). Optimizing for 3D geometry matching and fluid dynamic residuals.
-- **Initial Results**: Significant decrease in silhouette loss achieved by iteration 10,000; neural flow fields are beginning to converge.
-- **Next Steps**: Differentiable X-ray rasterization optimization and high-resolution 3D flow visualization.
+- **Training**: Refinement phase active (Run `refinement_v1`).
+- **Major Fix**: Corrected the projection geometry to match `gVXR` (Source-Detector X-axis) and implemented a **Distance Transform Loss** for high-fidelity silhouette matching.
+- **Initial Results**: Reconstructed geometry now accurately reflects the vascular morphology of the ImageCAS coronary trees.

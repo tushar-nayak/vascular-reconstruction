@@ -53,11 +53,11 @@ class GaussianSplatting(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self):
-        # Initialize in a sphere for now
-        nn.init.uniform_(self._xyz, -100, 100)
+        # Initialize in a volume matching the vessels (roughly -50 to 50)
+        nn.init.uniform_(self._xyz, -60, 60)
         nn.init.zeros_(self._features_dc)
         nn.init.zeros_(self._features_rest)
-        nn.init.constant_(self._scaling, 1.0)
+        nn.init.constant_(self._scaling, 0.5) # ~1.6mm scale initially
         nn.init.constant_(self._rotation, 0)
         self._rotation.data[:, 0] = 1.0 # identity quaternion
         nn.init.constant_(self._opacity, 0.1)
@@ -105,45 +105,59 @@ class PINN_GS(nn.Module):
         self.gs = GaussianSplatting(num_gaussians)
         self.pinn = PINN(**pinn_config)
 
-    def project_xray(self, view_matrix: torch.Tensor, proj_matrix: torch.Tensor, img_size: tuple[int, int]):
+    def get_view_matrix(self, lao: float, cran: float, device: str = "cpu") -> torch.Tensor:
+        """Compute camera view matrix from angles, matching gVXR convention."""
+        lao_rad = np.radians(lao)
+        cran_rad = np.radians(cran)
+        
+        # Ry: Rotation about Y
+        ry = torch.tensor([
+            [np.cos(lao_rad), 0, np.sin(lao_rad), 0],
+            [0, 1, 0, 0],
+            [-np.sin(lao_rad), 0, np.cos(lao_rad), 0],
+            [0, 0, 0, 1]
+        ], dtype=torch.float32, device=device)
+        
+        # Rz: Rotation about Z
+        rz = torch.tensor([
+            [np.cos(cran_rad), -np.sin(cran_rad), 0, 0],
+            [np.sin(cran_rad), np.cos(cran_rad), 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ], dtype=torch.float32, device=device)
+        
+        return rz @ ry
+
+    def project_points(self, view_matrix: torch.Tensor, img_size: int = 1024) -> torch.Tensor:
         """
-        Differentiable X-ray projection of the Gaussians (Beer-Lambert).
-        Vectorized PyTorch implementation.
+        Project Gaussian centers to 2D image coordinates.
+        Matches gVXR Source(-600) -> Center(0) -> Detector(400) geometry.
         """
         xyz = self.gs.get_xyz
-        opacity = self.gs.get_opacity
-        cov3d = self.gs.get_covariance()
-        
-        # 1. Transform centers to camera space
-        # view_matrix: [4, 4]
         xyz_hom = torch.cat([xyz, torch.ones_like(xyz[:, :1])], dim=-1)
+        
+        # Transform centers: P' = R @ P
+        # view_matrix is [4, 4]
         xyz_cam = (xyz_hom @ view_matrix.T)[:, :3]
         
-        # 2. Project 3D Covariance to 2D
-        # For X-ray (parallel or perspective), the projection of a 3D Gaussian is a 2D Gaussian
-        W = view_matrix[:3, :3]
+        # Perspective projection along X-axis
+        # x_dist = x_cam + 600
+        # u = 1000 * y_cam / x_dist
+        # v = 1000 * (-z_cam) / x_dist
+        x_dist = xyz_cam[:, 0] + 600.0
         
-        # cov2d = J @ W @ cov3d @ W^T @ J^T
-        # For simplicity in this version, assume orthographic/near-orthographic for the split trees
-        cov_cam = W @ cov3d @ W.T
-        cov2d = cov_cam[:, :2, :2] # Take top-left 2x2
+        # Avoid division by zero
+        x_dist = torch.clamp(x_dist, min=1.0)
         
-        # 3. Rasterize (Simplified: Sum of Gaussians)
-        # We'll use a small subset of Gaussians or a coarser grid if needed for speed
-        # But let's try a vectorized point-in-Gaussian check
+        u = (1000.0 * xyz_cam[:, 1]) / x_dist
+        v = (1000.0 * (-xyz_cam[:, 2])) / x_dist
         
-        h, w = img_size
-        y, x = torch.meshgrid(torch.linspace(-150, 150, h, device=xyz.device), 
-                              torch.linspace(-150, 150, w, device=xyz.device), indexing='ij')
-        pixel_coords = torch.stack([x, y], dim=-1).reshape(-1, 2) # [H*W, 2]
+        # Scale to pixels: detector is 300mm wide
+        # pixel_coords = (proj / 150) * 512 + 512
+        u_pix = (u / 150.0) * (img_size / 2.0) + (img_size / 2.0)
+        v_pix = (v / 150.0) * (img_size / 2.0) + (img_size / 2.0)
         
-        # This is the memory-intensive part. For 100k Gaussians and 1024x1024 pixels, it's too big.
-        # We need to process in tiles or use a more efficient approach.
-        # For the prototype, we'll use a smaller number of Gaussians or lower res.
-        
-        # Placeholder: Return a sum of 2D Gaussians
-        # In a real impl, we'd use tile-based rasterization
-        return torch.zeros((h, w), device=xyz.device, requires_grad=True)
+        return torch.stack([u_pix, v_pix], dim=-1)
 
     def forward(self, x, y, z, t):
         return self.pinn(x, y, z, t)

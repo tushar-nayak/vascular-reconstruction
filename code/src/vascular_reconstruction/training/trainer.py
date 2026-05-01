@@ -1,4 +1,4 @@
-"""Training loop for vascular reconstruction."""
+"""Training loop for vascular reconstruction with improved projection and DT loss."""
 
 from __future__ import annotations
 
@@ -32,85 +32,63 @@ class Trainer:
         self.device = device
 
         # Separate optimizers for GS and PINN
-        self.gs_optimizer = optim.Adam(self.model.gs.parameters(), lr=0.005)
+        self.gs_optimizer = optim.Adam(self.model.gs.parameters(), lr=0.01)
         self.pinn_optimizer = optim.Adam(self.model.pinn.parameters(), lr=1e-4)
-
-    def get_view_matrix(self, lao: float, cran: float) -> torch.Tensor:
-        """Compute camera view matrix from angles."""
-        lao_rad = np.radians(lao)
-        cran_rad = np.radians(cran)
-        
-        ry = torch.tensor([
-            [np.cos(lao_rad), 0, np.sin(lao_rad), 0],
-            [0, 1, 0, 0],
-            [-np.sin(lao_rad), 0, np.cos(lao_rad), 0],
-            [0, 0, 0, 1]
-        ], dtype=torch.float32, device=self.device)
-        
-        rz = torch.tensor([
-            [np.cos(cran_rad), -np.sin(cran_rad), 0, 0],
-            [np.sin(cran_rad), np.cos(cran_rad), 0, 0],
-            [0, 0, 1, 0],
-            [0, 0, 0, 1]
-        ], dtype=torch.float32, device=self.device)
-        
-        return rz @ ry
 
     def train_step(self, case_data: dict):
         self.gs_optimizer.zero_grad()
         self.pinn_optimizer.zero_grad()
 
-        # 1. Geometry Loss (Image Projection)
+        # 1. Geometry Loss (Distance Transform on Projections)
         views = case_data["views"]
-        view = views[torch.randint(0, len(views), (1,)).item()]
         
-        target_image = torch.from_numpy(view["image"]).float().to(self.device) / 255.0
-        lao, cran = view["angles"]
-        view_matrix = self.get_view_matrix(lao, cran)
+        total_dt_loss = 0
         
-        xyz = self.model.gs.get_xyz
-        xyz_hom = torch.cat([xyz, torch.ones_like(xyz[:, :1])], dim=-1)
-        xyz_cam = (xyz_hom @ view_matrix.T)[:, :3]
-        
-        # Simple point projection
-        x_proj = xyz_cam[:, 0] / (xyz_cam[:, 2] + 600) * 1000 + 512
-        y_proj = xyz_cam[:, 1] / (xyz_cam[:, 2] + 600) * 1000 + 512
-        
-        mask = (x_proj >= 0) & (x_proj < 1024) & (y_proj >= 0) & (y_proj < 1024)
-        
-        if torch.sum(mask) > 0:
-            vessel_mask = 1.0 - target_image
-            grid_coords = torch.stack([
-                (x_proj[mask] / 512.0) - 1.0,
-                (y_proj[mask] / 512.0) - 1.0
-            ], dim=-1).unsqueeze(0).unsqueeze(0)
+        for view in views:
+            lao, cran = view["angles"]
+            view_matrix = self.model.get_view_matrix(lao, cran, device=self.device)
             
-            sampled_values = torch.nn.functional.grid_sample(
-                vessel_mask.unsqueeze(0).unsqueeze(0), 
+            # Project points to 2D
+            # projected_coords: [N, 2] in pixel space
+            projected_coords = self.model.project_points(view_matrix, img_size=1024)
+            
+            # Distance Transform of the vessel mask
+            # dt_map: [1024, 1024], values are distance to nearest vessel pixel
+            dt_map = torch.from_numpy(view["distance_transform"]).to(self.device)
+            
+            # Sample DT values at projected locations
+            # grid_sample expects coordinates in [-1, 1]
+            grid_coords = (projected_coords / 512.0) - 1.0
+            grid_coords = grid_coords.unsqueeze(0).unsqueeze(0) # [1, 1, N, 2]
+            
+            # sampled_dt: [N]
+            sampled_dt = torch.nn.functional.grid_sample(
+                dt_map.unsqueeze(0).unsqueeze(0), 
                 grid_coords, 
                 align_corners=True,
-                mode='bilinear',
-                padding_mode='zeros'
+                padding_mode='border'
             ).squeeze()
             
-            loss_image = 1.0 - torch.mean(sampled_values)
-        else:
-            # Penalty for being out of bounds
-            loss_image = torch.mean(torch.abs(xyz)) * 0.01
+            # Minimize distance to vessels
+            total_dt_loss += torch.mean(sampled_dt)
+            
+        loss_image = total_dt_loss / len(views)
 
         # 2. Physics Loss (Navier-Stokes)
-        raw_coords = torch.rand(512, 4, device=self.device, requires_grad=True)
-        # Avoid in-place modification
-        coords = torch.zeros_like(raw_coords)
-        coords_xyz = (raw_coords[:, :3] - 0.5) * 200.0
+        raw_coords = torch.rand(1024, 4, device=self.device, requires_grad=True)
+        # Match Gaussian volume (-60 to 60)
+        coords_xyz = (raw_coords[:, :3] - 0.5) * 120.0
         coords_t = raw_coords[:, 3:4]
         coords = torch.cat([coords_xyz, coords_t], dim=-1)
         
         pinn_out = self.model(coords[:, 0:1], coords[:, 1:2], coords[:, 2:3], coords[:, 3:4])
         loss_physics = navier_stokes_loss(pinn_out, coords)
 
+        # 3. Regularization: Keep Gaussians compact
+        # loss_reg = torch.mean(self.model.gs.get_scaling()) * 0.1
+        
         # Total Loss
-        total_loss = loss_image + 0.01 * loss_physics
+        total_loss = loss_image + 0.05 * loss_physics # Increased physics weight slightly
         
         total_loss.backward()
         
@@ -130,15 +108,14 @@ class Trainer:
             try:
                 loss, l_img, l_phys = self.train_step(case_data)
                 if i % 10 == 0:
-                    pbar.set_description(f"Loss: {loss:.4f} | Img: {l_img:.4f} | Phys: {l_phys:.4f}")
+                    pbar.set_description(f"Loss: {loss:.4f} | DT: {l_img:.4f} | Phys: {l_phys:.4f}")
             except Exception as e:
                 # print(f"Error at iteration {i}: {e}")
                 continue
             
             if i > 0 and i % self.config.save_interval == 0:
                 self.save_checkpoint(i)
-        
-        # Save final model
+                
         self.save_checkpoint(self.config.iterations)
 
     def save_checkpoint(self, iteration: int):
