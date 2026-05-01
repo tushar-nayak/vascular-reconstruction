@@ -50,8 +50,15 @@ python code/scripts/generate_dataset.py --config code/configs/imagecas_generatio
 python code/scripts/train.py --data-dir data/processed/imagecas/projections --experiment-name coronary_reconstruction_v1
 ```
 
+### 4. Visualization
+```bash
+# Generate 3D geometry and flow field plots from a checkpoint
+python code/scripts/visualize_reconstruction.py --checkpoint checkpoints/checkpoint_10000.pt
+```
+
 ## Current Status
 
 - **Dataset**: ~2,000 coronary trees processed; ~11,000 X-ray projections generated.
-- **Training**: Active. Optimizing for 3D geometry matching and fluid dynamic residuals.
-- **Next Steps**: Differentiable X-ray rasterization optimization and 3D flow visualization.
+- **Training**: Active (Run `hybrid_v2`). Optimizing for 3D geometry matching and fluid dynamic residuals.
+- **Initial Results**: Significant decrease in silhouette loss achieved by iteration 10,000; neural flow fields are beginning to converge.
+- **Next Steps**: Differentiable X-ray rasterization optimization and high-resolution 3D flow visualization.
