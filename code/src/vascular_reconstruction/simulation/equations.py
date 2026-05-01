@@ -19,54 +19,48 @@ def navier_stokes_loss(
     w = pinn_output[:, 2:3]
     p = pinn_output[:, 3:4]
 
-    x = coords[:, 0:1]
-    y = coords[:, 1:2]
-    z = coords[:, 2:3]
-    t = coords[:, 3:4]
-
-    # Gradients
+    # Helper for gradients
     def grad(q, r):
-        return torch.autograd.grad(
+        # Check if q is differentiable
+        if not q.requires_grad:
+            return torch.zeros_like(r)
+            
+        g = torch.autograd.grad(
             q, r, grad_outputs=torch.ones_like(q), create_graph=True, retain_graph=True, allow_unused=True
-        )[0] or torch.zeros_like(r)
+        )[0]
+        if g is None:
+            return torch.zeros_like(r)
+        return g
 
-    u_x = grad(u, x)
-    u_y = grad(u, y)
-    u_z = grad(u, z)
-    u_t = grad(u, t)
-
-    v_x = grad(v, x)
-    v_y = grad(v, y)
-    v_z = grad(v, z)
-    v_t = grad(v, t)
-
-    w_x = grad(w, x)
-    w_y = grad(w, y)
-    w_z = grad(w, z)
-    w_t = grad(w, t)
-
-    p_x = grad(p, x)
-    p_y = grad(p, y)
-    p_z = grad(p, z)
+    u_g = grad(u, coords)
+    u_x, u_y, u_z, u_t = u_g[:, 0:1], u_g[:, 1:2], u_g[:, 2:3], u_g[:, 3:4]
+    
+    v_g = grad(v, coords)
+    v_x, v_y, v_z, v_t = v_g[:, 0:1], v_g[:, 1:2], v_g[:, 2:3], v_g[:, 3:4]
+    
+    w_g = grad(w, coords)
+    w_x, w_y, w_z, w_t = w_g[:, 0:1], w_g[:, 1:2], w_g[:, 2:3], w_g[:, 3:4]
+    
+    p_g = grad(p, coords)
+    p_x, p_y, p_z = p_g[:, 0:1], p_g[:, 1:2], p_g[:, 2:3]
 
     # Second derivatives
-    u_xx = grad(u_x, x)
-    u_yy = grad(u_y, y)
-    u_zz = grad(u_z, z)
+    u_xx = grad(u_x, coords)[:, 0:1]
+    u_yy = grad(u_y, coords)[:, 1:2]
+    u_zz = grad(u_z, coords)[:, 2:3]
 
-    v_xx = grad(v_x, x)
-    v_yy = grad(v_y, y)
-    v_zz = grad(v_z, z)
+    v_xx = grad(v_x, coords)[:, 0:1]
+    v_yy = grad(v_y, coords)[:, 1:2]
+    v_zz = grad(v_z, coords)[:, 2:3]
 
-    w_xx = grad(w_x, x)
-    w_yy = grad(w_y, y)
-    w_zz = grad(w_z, z)
+    w_xx = grad(w_x, coords)[:, 0:1]
+    w_yy = grad(w_y, coords)[:, 1:2]
+    w_zz = grad(w_z, coords)[:, 2:3]
 
     # Continuity equation: div(V) = 0
     continuity = u_x + v_y + w_z
 
     # Momentum equations (Navier-Stokes)
-    # rho(V_t + V.grad(V)) = -grad(p) + mu * laplacian(V)
     f_u = rho * (u_t + u * u_x + v * u_y + w * u_z) + p_x - mu * (u_xx + u_yy + u_zz)
     f_v = rho * (v_t + u * v_x + v * v_y + w * v_z) + p_y - mu * (v_xx + v_yy + v_zz)
     f_w = rho * (w_t + u * w_x + v * w_y + w * w_z) + p_z - mu * (w_xx + w_yy + w_zz)

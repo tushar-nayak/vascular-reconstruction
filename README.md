@@ -1,41 +1,57 @@
-# vascular-reconstruction
-A mesh-free framework for real-time 3D hemodynamic reconstruction from sparse 2D angiography. By embedding Physics-Informed Neural Networks (PINNs) into 3D Gaussian Splatting, it explicitly reconstructs vascular geometry while simultaneously solving Navier-Stokes equations to render blood flow velocity and pressure in real time.
+# Physics-Informed Gaussian Splatting for Vascular Reconstruction
 
-## What Changed
+A mesh-free framework for real-time 3D hemodynamic reconstruction from sparse 2D angiography. By embedding Physics-Informed Neural Networks (PINNs) into 3D Gaussian Splatting, it explicitly reconstructs vascular geometry and solves blood flow dynamics (Navier-Stokes) simultaneously.
 
-The repository is now structured around a `code/` workspace so the project root stays clean and the implementation lives in one place.
+## Features
 
-Current layout:
+- **Smooth Mesh Extraction**: Optimized Marching Cubes with Gaussian smoothing for high-fidelity vasculature from CT segmentations.
+- **Tree Splitting & Denoising**: Automated separation of Left and Right coronary trees with connected-component analysis.
+- **High-Speed Projection Pipeline**: GPU-accelerated X-ray projection rendering using `gVXR`, capable of generating thousands of training views in minutes.
+- **Hybrid PINN-GS Model**: Combined differentiable Gaussian Splatting for geometry and neural networks for flow velocity (u, v, w) and pressure (p).
+- **Physics-Informed Training**: Integrated Navier-Stokes residuals for fluid dynamic consistency.
 
-- `code/src/vascular_reconstruction/` - core Python package
-- `code/configs/` - configuration files for experiments and models
-- `code/scripts/` - runnable entry points, including `download_datasets.py`
-- `data/` - raw and processed dataset assets
-- `code/experiments/` - experiment notes and result artifacts
-- `code/tests/` - test scaffolding
+## Project Structure
 
-The package skeleton inside `code/src/vascular_reconstruction/` is split into:
+- `code/src/vascular_reconstruction/`: Core package
+    - `models/`: Hybrid PINN-GS architecture.
+    - `simulation/`: Navier-Stokes loss functions and physics constraints.
+    - `data/`: Dataset loaders for multi-view projections.
+    - `training/`: Optimization loops and trainer logic.
+- `code/scripts/`: 
+    - `convert_imagecas_to_mesh.py`: Smooth mesh generation.
+    - `split_meshes.py`: Left/Right coronary tree separation.
+    - `generate_dataset.py`: Multi-worker gVXR X-ray rendering.
+    - `train.py`: Main training entry point.
+- `data/`: (Gitignored) Large binary assets including STL meshes and rendered projections.
 
-- `data` for angiography loading and preprocessing
-- `data.adapters.imagecas` for ImageCAS volume and mesh discovery
-- `models` for PINN, Gaussian Splatting, and hybrid components
-- `simulation` for flow equations and solvers
-- `rendering` for visualization and inference output
-- `training` for optimization and experiment loops
-- `evaluation` for metrics and benchmarking
-- `utils` for shared helpers
+## Getting Started
 
-## Notes
+### 1. Environment Setup
+```bash
+# Recommended Python 3.10
+pip install numpy pillow trimesh tqdm gvxr torch torchvision nibabel scikit-image scipy
+```
 
-- The previous top-level source folders were moved under `code/`.
-- Generated outputs, checkpoints, and logs should live under `code/`, while raw dataset assets live under `data/`.
-- `code/scripts/download_datasets.py` downloads ImageCAS through `kagglehub` and stages it under `data/raw/imagecas/`.
-- `LICENSE` remains at the repository root.
+### 2. Data Preparation
+```bash
+# Convert NIfTI labels to smooth meshes
+python code/scripts/convert_imagecas_to_mesh.py --input-dir data/raw/imagecas --output-dir data/processed/imagecas/meshes --sigma 1.5
 
-## Next Step
+# Split coronary trees
+python code/scripts/split_meshes.py --input-dir data/processed/imagecas/meshes --output-dir data/processed/imagecas/meshes_split
 
-If you want, I can turn this scaffold into a working package next by adding:
+# Generate synthetic X-ray projections
+python code/scripts/generate_dataset.py --config code/configs/imagecas_generation.json
+```
 
-1. a `pyproject.toml` with dependencies and tooling
-2. a training/evaluation entry point
-3. a minimal dataset and config loader
+### 3. Training
+```bash
+# Launch hybrid optimization
+python code/scripts/train.py --data-dir data/processed/imagecas/projections --experiment-name coronary_reconstruction_v1
+```
+
+## Current Status
+
+- **Dataset**: ~2,000 coronary trees processed; ~11,000 X-ray projections generated.
+- **Training**: Active. Optimizing for 3D geometry matching and fluid dynamic residuals.
+- **Next Steps**: Differentiable X-ray rasterization optimization and 3D flow visualization.

@@ -1,0 +1,25 @@
+{
+    "input_dir": "data/processed/imagecas/meshes_split",
+    "output_dir": "data/processed/imagecas/projections",
+    "image_size": 1024,
+    "depth_size": 512,
+    "source_pos_mm": [-600.0, 0.0, 0.0],
+    "detector_pos_mm": [400.0, 0.0, 0.0],
+    "detector_size_mm": 300.0,
+    "mono_energy_mev": 0.06,
+    "photon_count": 1000,
+    "vessel_density_g_cm3": 2.0,
+    "vessel_compound": "H2O",
+    "mesh_pattern": "*.stl",
+    "gpu_ids": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    "resume": true,
+    "temp_mesh_prefix": "temp_geometry_gpu",
+    "views": [
+        {"name": "AP", "lao_angle_deg": 0, "cran_angle_deg": 0},
+        {"name": "Lateral", "lao_angle_deg": 90, "cran_angle_deg": 0},
+        {"name": "LAO45", "lao_angle_deg": 45, "cran_angle_deg": 0},
+        {"name": "RAO45", "lao_angle_deg": -45, "cran_angle_deg": 0},
+        {"name": "Spider", "lao_angle_deg": 45, "cran_angle_deg": 20},
+        {"name": "RAO30_Caudal20", "lao_angle_deg": -30, "cran_angle_deg": -20}
+    ]
+}
