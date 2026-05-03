@@ -66,6 +66,21 @@ def test_trainer_checkpoint_contains_configs_and_optimizer_state(tmp_path):
     assert "pinn_optimizer_state_dict" in checkpoint
 
 
+def test_trainer_can_restore_checkpoint_state(tmp_path):
+    trainer = _build_trainer(tmp_path, num_gaussians=8)
+    with torch.no_grad():
+        trainer.model.gs._xyz.fill_(3.0)
+    trainer.save_checkpoint(9)
+
+    restored_root = tmp_path / "restored"
+    restored_root.mkdir()
+    restored = _build_trainer(restored_root, num_gaussians=8)
+    restored_iteration = restored.load_checkpoint(tmp_path / "checkpoints" / "checkpoint_9.pt")
+
+    assert restored_iteration == 9
+    assert torch.allclose(restored.model.gs._xyz, torch.full_like(restored.model.gs._xyz, 3.0))
+
+
 def test_trainer_bootstraps_gaussians_from_dataset(tmp_path):
     trainer = _build_trainer(tmp_path)
     xyz = trainer.model.gs.get_xyz.detach().cpu().numpy()

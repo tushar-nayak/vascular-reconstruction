@@ -305,12 +305,30 @@ class Trainer:
         return total_loss.item(), loss_image.item(), loss_physics.item(), loss_reg.item(), reg_stats
 
     def train(self) -> None:
+        self.train_from_iteration(0)
+
+    def load_checkpoint(self, checkpoint_path: str | Path) -> int:
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.gs_optimizer.load_state_dict(checkpoint["gs_optimizer_state_dict"])
+        self.pinn_optimizer.load_state_dict(checkpoint["pinn_optimizer_state_dict"])
+
+        loaded_case_index = int(checkpoint.get("case_index", self.case_index))
+        if loaded_case_index != self.case_index:
+            raise ValueError(
+                "Checkpoint case index does not match the active trainer case index: "
+                f"{loaded_case_index} != {self.case_index}"
+            )
+
+        return int(checkpoint["iteration"])
+
+    def train_from_iteration(self, start_iteration: int) -> None:
         print(
             f"Starting training for {self.config.iterations} iterations on case "
-            f"{self.case_index} ({self.case_id})..."
+            f"{self.case_index} ({self.case_id}) from iteration {start_iteration}..."
         )
 
-        pbar = tqdm(range(self.config.iterations))
+        pbar = tqdm(range(start_iteration, self.config.iterations))
         for i in pbar:
             try:
                 loss, l_img, l_phys, l_reg, reg_stats = self.train_step(i)

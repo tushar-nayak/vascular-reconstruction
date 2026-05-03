@@ -6,6 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import torch
+
 # Add src to path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -23,18 +25,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-config", type=Path, help="Path to a model config JSON.")
     parser.add_argument("--case-index", type=int, help="Dataset case index to reconstruct.")
     parser.add_argument("--experiment-name", type=str, help="Override experiment name.")
+    parser.add_argument("--resume-checkpoint", type=Path, help="Resume training from an existing checkpoint.")
     return parser
 
 
 def train(args: argparse.Namespace) -> None:
     # 1. Load config
+    resume_checkpoint = None
+    if args.resume_checkpoint:
+        resume_checkpoint = torch.load(args.resume_checkpoint, map_location="cpu")
+
     if args.config:
         train_config = TrainingConfig.load(args.config)
+    elif resume_checkpoint is not None and "training_config" in resume_checkpoint:
+        train_config = TrainingConfig.from_dict(resume_checkpoint["training_config"])
     else:
         train_config = TrainingConfig()
         
     if args.model_config:
         model_config = ModelConfig.load(args.model_config)
+    elif resume_checkpoint is not None and "model_config" in resume_checkpoint:
+        model_config = ModelConfig.from_dict(resume_checkpoint["model_config"])
     else:
         model_config = ModelConfig()
         
@@ -42,6 +53,8 @@ def train(args: argparse.Namespace) -> None:
         train_config.experiment_name = args.experiment_name
     if args.case_index is not None:
         train_config.train_case_index = args.case_index
+    elif resume_checkpoint is not None:
+        train_config.train_case_index = int(resume_checkpoint.get("case_index", train_config.train_case_index))
         
     print(f"Starting experiment: {train_config.experiment_name}")
     
@@ -69,7 +82,11 @@ def train(args: argparse.Namespace) -> None:
     )
     
     # 5. Start training
-    trainer.train()
+    if args.resume_checkpoint:
+        start_iteration = trainer.load_checkpoint(args.resume_checkpoint)
+        trainer.train_from_iteration(start_iteration)
+    else:
+        trainer.train()
 
 
 def main() -> None:
