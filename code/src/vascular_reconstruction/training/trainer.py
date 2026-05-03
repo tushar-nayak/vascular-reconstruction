@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+from skimage.morphology import skeletonize
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
@@ -104,7 +105,10 @@ class Trainer:
         world_points: list[np.ndarray] = []
 
         for view in views:
-            vessel_pixels = np.argwhere(np.asarray(view["vessel_mask"]) > 0.5)
+            vessel_mask = np.asarray(view["vessel_mask"]) > 0.5
+            vessel_pixels = np.argwhere(skeletonize(vessel_mask))
+            if len(vessel_pixels) == 0:
+                vessel_pixels = np.argwhere(vessel_mask)
             if len(vessel_pixels) == 0:
                 continue
 
@@ -151,7 +155,16 @@ class Trainer:
         bce = F.binary_cross_entropy(rendered.clamp(1e-5, 1.0 - 1e-5), target_mask)
         intersection = torch.sum(rendered * target_mask)
         dice = 1.0 - (2.0 * intersection + 1e-5) / (torch.sum(rendered) + torch.sum(target_mask) + 1e-5)
-        return self.config.mask_bce_weight * bce + self.config.mask_dice_weight * dice
+        outside_mass = torch.mean(rendered * (1.0 - target_mask))
+        target_mass = torch.mean(target_mask)
+        rendered_mass = torch.mean(rendered)
+        mass_match = torch.abs(rendered_mass - target_mass)
+        return (
+            self.config.mask_bce_weight * bce
+            + self.config.mask_dice_weight * dice
+            + self.config.outside_mask_weight * outside_mass
+            + self.config.mass_match_weight * mass_match
+        )
 
     def _geometry_regularization(self) -> tuple[torch.Tensor, dict[str, float]]:
         xyz = self.model.gs.get_xyz

@@ -1,0 +1,6 @@
+{
+    "num_gaussians": 12000,
+    "sh_degree": 3,
+    "pinn_hidden_dim": 128,
+    "pinn_num_layers": 4
+}

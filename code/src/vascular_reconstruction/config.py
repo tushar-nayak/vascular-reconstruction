@@ -49,12 +49,14 @@ class TrainingConfig(BaseConfig):
     std_floor_weight: float = 0.05
     axis_std_floor: float = 6.0
     opacity_weight: float = 0.01
-    opacity_mean_target: float = 0.65
-    scale_weight: float = 0.01
-    scale_mean_target: float = 1.2
+    opacity_mean_target: float = 0.8
+    scale_weight: float = 0.02
+    scale_mean_target: float = 0.25
     silhouette_loss_weight: float = 1.0
     mask_bce_weight: float = 0.7
     mask_dice_weight: float = 0.3
+    outside_mask_weight: float = 0.5
+    mass_match_weight: float = 0.1
     render_image_size: int = 128
     gaussian_chunk_size: int = 512
     physics_warmup_iterations: int = 5000
@@ -67,9 +69,9 @@ class TrainingConfig(BaseConfig):
     device: str = "auto"
     max_failures: int = 5
     init_from_case_index: int = 0
-    init_depth_mm: float = 20.0
-    init_jitter_mm: float = 4.0
-    max_init_views: int = 4
+    init_depth_mm: float = 8.0
+    init_jitter_mm: float = 1.5
+    max_init_views: int = 6
     train_case_index: int = 0
 
 

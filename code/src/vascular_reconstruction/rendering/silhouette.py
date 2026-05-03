@@ -35,7 +35,7 @@ def render_gaussian_silhouette(
     scaling = model.gs.get_scaling
     world_radius = torch.mean(scaling[:, 1:], dim=-1)
     focal = 0.5 * (scaled_projection[0, 0] + scaled_projection[1, 1])
-    screen_sigma = torch.clamp((focal * world_radius) / x_dist, min=0.6, max=6.0)
+    screen_sigma = torch.clamp((focal * world_radius) / x_dist, min=0.35, max=2.0)
     weights = model.gs.get_opacity.squeeze(-1)
 
     grid_y, grid_x = torch.meshgrid(
@@ -65,10 +65,12 @@ def downsample_mask(mask: torch.Tensor, render_size: int) -> torch.Tensor:
     """Downsample a binary vessel mask to the renderer size."""
     if mask.ndim != 2:
         raise ValueError("Expected mask with shape [H, W].")
-    resized = F.interpolate(
-        mask.unsqueeze(0).unsqueeze(0),
-        size=(render_size, render_size),
-        mode="bilinear",
-        align_corners=False,
-    )
+    mask_4d = mask.unsqueeze(0).unsqueeze(0)
+    height, width = mask.shape
+    if height % render_size == 0 and width % render_size == 0:
+        kernel_h = height // render_size
+        kernel_w = width // render_size
+        resized = F.max_pool2d(mask_4d, kernel_size=(kernel_h, kernel_w), stride=(kernel_h, kernel_w))
+    else:
+        resized = F.adaptive_max_pool2d(mask_4d, output_size=(render_size, render_size))
     return resized.squeeze(0).squeeze(0).clamp(0.0, 1.0)
