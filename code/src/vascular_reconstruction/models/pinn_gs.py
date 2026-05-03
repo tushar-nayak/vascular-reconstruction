@@ -62,6 +62,35 @@ class GaussianSplatting(nn.Module):
         self._rotation.data[:, 0] = 1.0 # identity quaternion
         nn.init.constant_(self._opacity, 0.1)
 
+    def initialize_from_points(
+        self,
+        points: torch.Tensor,
+        scale_value: float = 0.2,
+        opacity_value: float = 0.4,
+    ) -> None:
+        """Seed Gaussian parameters from a 3D point cloud."""
+        if points.ndim != 2 or points.shape[1] != 3:
+            raise ValueError("Expected points with shape [N, 3].")
+        if len(points) == 0:
+            raise ValueError("Cannot initialize from an empty point set.")
+
+        device = self._xyz.device
+        points = points.to(device=device, dtype=self._xyz.dtype)
+
+        if len(points) < self.num_gaussians:
+            repeat_count = (self.num_gaussians + len(points) - 1) // len(points)
+            points = points.repeat((repeat_count, 1))
+
+        points = points[: self.num_gaussians]
+        self._xyz.data.copy_(points)
+        self._features_dc.data.zero_()
+        self._features_rest.data.zero_()
+        self._scaling.data.fill_(float(np.log(scale_value)))
+        self._rotation.data.zero_()
+        self._rotation.data[:, 0] = 1.0
+        clamped_opacity = float(np.clip(opacity_value, 1e-4, 1.0 - 1e-4))
+        self._opacity.data.fill_(float(np.log(clamped_opacity / (1.0 - clamped_opacity))))
+
     @property
     def get_scaling(self) -> torch.Tensor:
         return torch.exp(self._scaling)

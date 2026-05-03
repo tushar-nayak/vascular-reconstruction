@@ -43,12 +43,27 @@ class TrainingConfig(BaseConfig):
     learning_rate: float = 0.001
     pinn_learning_rate: float = 0.0001
     physics_loss_weight: float = 0.05
+    repulsion_weight: float = 0.02
+    min_gaussian_separation: float = 1.5
+    repulsion_num_samples: int = 512
+    std_floor_weight: float = 0.05
+    axis_std_floor: float = 6.0
+    opacity_weight: float = 0.01
+    opacity_mean_target: float = 0.65
+    scale_weight: float = 0.01
+    scale_mean_target: float = 1.2
     save_interval: int = 5000
     eval_interval: int = 1000
     checkpoint_dir: str = "checkpoints"
     log_dir: str = "logs"
+    debug_projection_dir: str = "logs/projections"
+    debug_projection_interval: int = 1000
     device: str = "auto"
     max_failures: int = 5
+    init_from_case_index: int = 0
+    init_depth_mm: float = 20.0
+    init_jitter_mm: float = 4.0
+    max_init_views: int = 4
 
 
 @dataclass
