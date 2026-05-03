@@ -63,13 +63,13 @@ class ProjectionDataset:
                 "angles": meta["angles_deg"],
                 "projection_matrix": meta["projection_matrix"],
             }
+            vessel_mask = (image_np < 200).astype(np.float32)
+            view_data["vessel_mask"] = vessel_mask
             
             if self.compute_dt:
                 # Precompute or retrieve Distance Transform of the vessel mask
                 # Vessels are dark (< 128 roughly), background is light (~255)
                 # We want DT of the silhouette.
-                vessel_mask = (image_np < 200).astype(np.float32)
-                
                 dt_key = meta["image_file"]
                 if dt_key not in self.dt_cache:
                     # DT is distance to the nearest NON-vessel pixel?

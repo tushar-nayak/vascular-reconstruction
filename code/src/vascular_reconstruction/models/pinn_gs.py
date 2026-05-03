@@ -157,11 +157,11 @@ class PINN_GS(nn.Module):
         
         return rz @ ry
 
-    def project_points(
+    def project_gaussians(
         self,
         view_matrix: torch.Tensor,
         projection_matrix: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Project Gaussian centers to 2D image coordinates.
         Matches gVXR Source(-600) -> Center(0) -> Detector(400) geometry.
@@ -185,7 +185,15 @@ class PINN_GS(nn.Module):
         u_pix = (focal_x * xyz_cam[:, 1]) / x_dist + center_x
         v_pix = (focal_y * (-xyz_cam[:, 2])) / x_dist + center_y
 
-        return torch.stack([u_pix, v_pix], dim=-1)
+        return torch.stack([u_pix, v_pix], dim=-1), x_dist
+
+    def project_points(
+        self,
+        view_matrix: torch.Tensor,
+        projection_matrix: torch.Tensor,
+    ) -> torch.Tensor:
+        projected_coords, _ = self.project_gaussians(view_matrix, projection_matrix)
+        return projected_coords
 
     def forward(self, x, y, z, t):
         return self.pinn(x, y, z, t)

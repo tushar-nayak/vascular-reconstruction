@@ -21,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-dir", type=Path, required=True, help="Path to the dataset directory.")
     parser.add_argument("--config", type=Path, help="Path to a training config JSON.")
     parser.add_argument("--model-config", type=Path, help="Path to a model config JSON.")
+    parser.add_argument("--case-index", type=int, help="Dataset case index to reconstruct.")
     parser.add_argument("--experiment-name", type=str, help="Override experiment name.")
     return parser
 
@@ -39,12 +40,14 @@ def train(args: argparse.Namespace) -> None:
         
     if args.experiment_name:
         train_config.experiment_name = args.experiment_name
+    if args.case_index is not None:
+        train_config.train_case_index = args.case_index
         
     print(f"Starting experiment: {train_config.experiment_name}")
     
     # 2. Load dataset
     dataset = ProjectionDataset(args.data_dir)
-    print(f"Loaded dataset with {len(dataset)} cases.")
+    print(f"Loaded dataset with {len(dataset)} cases. Reconstructing case index {train_config.train_case_index}.")
     
     # 3. Initialize model
     pinn_config = {

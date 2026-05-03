@@ -52,6 +52,12 @@ class TrainingConfig(BaseConfig):
     opacity_mean_target: float = 0.65
     scale_weight: float = 0.01
     scale_mean_target: float = 1.2
+    silhouette_loss_weight: float = 1.0
+    mask_bce_weight: float = 0.7
+    mask_dice_weight: float = 0.3
+    render_image_size: int = 128
+    gaussian_chunk_size: int = 512
+    physics_warmup_iterations: int = 5000
     save_interval: int = 5000
     eval_interval: int = 1000
     checkpoint_dir: str = "checkpoints"
@@ -64,6 +70,7 @@ class TrainingConfig(BaseConfig):
     init_depth_mm: float = 20.0
     init_jitter_mm: float = 4.0
     max_init_views: int = 4
+    train_case_index: int = 0
 
 
 @dataclass
