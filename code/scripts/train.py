@@ -20,6 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train the vascular reconstruction model.")
     parser.add_argument("--data-dir", type=Path, required=True, help="Path to the dataset directory.")
     parser.add_argument("--config", type=Path, help="Path to a training config JSON.")
+    parser.add_argument("--model-config", type=Path, help="Path to a model config JSON.")
     parser.add_argument("--experiment-name", type=str, help="Override experiment name.")
     return parser
 
@@ -31,7 +32,10 @@ def train(args: argparse.Namespace) -> None:
     else:
         train_config = TrainingConfig()
         
-    model_config = ModelConfig()
+    if args.model_config:
+        model_config = ModelConfig.load(args.model_config)
+    else:
+        model_config = ModelConfig()
         
     if args.experiment_name:
         train_config.experiment_name = args.experiment_name
@@ -45,16 +49,20 @@ def train(args: argparse.Namespace) -> None:
     # 3. Initialize model
     pinn_config = {
         "hidden_dim": model_config.pinn_hidden_dim,
-        "num_layers": model_config.pinn_num_layers
+        "num_layers": model_config.pinn_num_layers,
     }
-    model = PINN_GS(num_gaussians=model_config.num_gaussians, pinn_config=pinn_config)
+    model = PINN_GS(
+        num_gaussians=model_config.num_gaussians,
+        pinn_config=pinn_config,
+        sh_degree=model_config.sh_degree,
+    )
     
     # 4. Initialize trainer
     trainer = Trainer(
         model=model,
         dataset=dataset,
         train_config=train_config,
-        model_config=model_config
+        model_config=model_config,
     )
     
     # 5. Start training

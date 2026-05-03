@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from pathlib import Path
+
 import torch
 import torch.optim as optim
-from pathlib import Path
 from tqdm import tqdm
-import numpy as np
 
 from vascular_reconstruction.config import ModelConfig, TrainingConfig
+from vascular_reconstruction.data.dataset import ProjectionDataset
 from vascular_reconstruction.models.pinn_gs import PINN_GS
 from vascular_reconstruction.simulation.equations import navier_stokes_loss
-from vascular_reconstruction.data.dataset import ProjectionDataset
 
 
 class Trainer:
@@ -23,55 +24,67 @@ class Trainer:
         dataset: ProjectionDataset,
         train_config: TrainingConfig,
         model_config: ModelConfig,
-        device: str = "cuda",
+        device: str | None = None,
     ):
-        self.model = model.to(device)
+        resolved_device = device or self._resolve_device(train_config.device)
         self.dataset = dataset
         self.config = train_config
         self.model_config = model_config
-        self.device = device
+        self.device = resolved_device
+        self.model = model.to(self.device)
+        self.failure_count = 0
 
         # Separate optimizers for GS and PINN
-        self.gs_optimizer = optim.Adam(self.model.gs.parameters(), lr=0.01)
-        self.pinn_optimizer = optim.Adam(self.model.pinn.parameters(), lr=1e-4)
+        self.gs_optimizer = optim.Adam(self.model.gs.parameters(), lr=self.config.learning_rate)
+        self.pinn_optimizer = optim.Adam(self.model.pinn.parameters(), lr=self.config.pinn_learning_rate)
 
-    def train_step(self, case_data: dict):
+    @staticmethod
+    def _resolve_device(configured_device: str) -> str:
+        if configured_device == "auto":
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        return configured_device
+
+    @staticmethod
+    def _projection_matrix_from_view(view: Mapping[str, object], device: str) -> torch.Tensor:
+        matrix = view["projection_matrix"]
+        return torch.tensor(matrix, dtype=torch.float32, device=device)
+
+    @staticmethod
+    def _grid_coords(projected_coords: torch.Tensor, width: int, height: int) -> torch.Tensor:
+        x = (projected_coords[:, 0] / max(width - 1, 1)) * 2.0 - 1.0
+        y = (projected_coords[:, 1] / max(height - 1, 1)) * 2.0 - 1.0
+        return torch.stack([x, y], dim=-1).view(1, 1, -1, 2)
+
+    def train_step(self, case_data: Mapping[str, object]) -> tuple[float, float, float]:
         self.gs_optimizer.zero_grad()
         self.pinn_optimizer.zero_grad()
 
         # 1. Geometry Loss (Distance Transform on Projections)
         views = case_data["views"]
         
-        total_dt_loss = 0
-        
+        total_dt_loss = torch.tensor(0.0, device=self.device)
+
         for view in views:
             lao, cran = view["angles"]
             view_matrix = self.model.get_view_matrix(lao, cran, device=self.device)
-            
-            # Project points to 2D
-            # projected_coords: [N, 2] in pixel space
-            projected_coords = self.model.project_points(view_matrix, img_size=1024)
-            
-            # Distance Transform of the vessel mask
-            # dt_map: [1024, 1024], values are distance to nearest vessel pixel
             dt_map = torch.from_numpy(view["distance_transform"]).to(self.device)
-            
-            # Sample DT values at projected locations
-            # grid_sample expects coordinates in [-1, 1]
-            grid_coords = (projected_coords / 512.0) - 1.0
-            grid_coords = grid_coords.unsqueeze(0).unsqueeze(0) # [1, 1, N, 2]
-            
-            # sampled_dt: [N]
+            height, width = dt_map.shape[-2:]
+            projection_matrix = self._projection_matrix_from_view(view, self.device)
+            projected_coords = self.model.project_points(
+                view_matrix=view_matrix,
+                projection_matrix=projection_matrix,
+            )
+            grid_coords = self._grid_coords(projected_coords, width=width, height=height)
+
             sampled_dt = torch.nn.functional.grid_sample(
-                dt_map.unsqueeze(0).unsqueeze(0), 
-                grid_coords, 
+                dt_map.unsqueeze(0).unsqueeze(0),
+                grid_coords,
                 align_corners=True,
-                padding_mode='border'
+                padding_mode="border",
             ).squeeze()
-            
-            # Minimize distance to vessels
+
             total_dt_loss += torch.mean(sampled_dt)
-            
+
         loss_image = total_dt_loss / len(views)
 
         # 2. Physics Loss (Navier-Stokes)
@@ -88,41 +101,53 @@ class Trainer:
         # loss_reg = torch.mean(self.model.gs.get_scaling()) * 0.1
         
         # Total Loss
-        total_loss = loss_image + 0.05 * loss_physics # Increased physics weight slightly
-        
+        total_loss = loss_image + self.config.physics_loss_weight * loss_physics
+
         total_loss.backward()
-        
+
         self.gs_optimizer.step()
         self.pinn_optimizer.step()
 
         return total_loss.item(), loss_image.item(), loss_physics.item()
 
-    def train(self):
+    def train(self) -> None:
         print(f"Starting training for {self.config.iterations} iterations...")
-        
+
         pbar = tqdm(range(self.config.iterations))
         for i in pbar:
             case_idx = i % len(self.dataset)
             case_data = self.dataset.get_case(case_idx)
-            
+
             try:
                 loss, l_img, l_phys = self.train_step(case_data)
+                self.failure_count = 0
                 if i % 10 == 0:
                     pbar.set_description(f"Loss: {loss:.4f} | DT: {l_img:.4f} | Phys: {l_phys:.4f}")
-            except Exception as e:
-                # print(f"Error at iteration {i}: {e}")
-                continue
-            
+            except Exception as exc:
+                self.failure_count += 1
+                print(f"Training failed at iteration {i}: {exc}")
+                if self.failure_count >= self.config.max_failures:
+                    raise RuntimeError(
+                        f"Training aborted after {self.failure_count} consecutive failures."
+                    ) from exc
+
             if i > 0 and i % self.config.save_interval == 0:
                 self.save_checkpoint(i)
-                
+
         self.save_checkpoint(self.config.iterations)
 
-    def save_checkpoint(self, iteration: int):
+    def save_checkpoint(self, iteration: int) -> None:
         path = Path(self.config.checkpoint_dir) / f"checkpoint_{iteration}.pt"
         path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({
-            'iteration': iteration,
-            'model_state_dict': self.model.state_dict(),
-        }, path)
+        torch.save(
+            {
+                "iteration": iteration,
+                "model_state_dict": self.model.state_dict(),
+                "gs_optimizer_state_dict": self.gs_optimizer.state_dict(),
+                "pinn_optimizer_state_dict": self.pinn_optimizer.state_dict(),
+                "training_config": self.config.to_dict(),
+                "model_config": self.model_config.to_dict(),
+            },
+            path,
+        )
         print(f"Saved checkpoint to {path}")

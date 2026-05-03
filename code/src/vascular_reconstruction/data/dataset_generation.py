@@ -232,6 +232,11 @@ def _chunk_mesh_files(mesh_files: list[str], gpu_ids: tuple[int, ...]) -> list[l
     return [mesh_files[index::len(gpu_ids)] for index in range(len(gpu_ids))]
 
 
+def _mesh_outputs_complete(output_dir: Path, mesh_path: str, view_specs: tuple[ViewSpec, ...]) -> bool:
+    base_name = Path(mesh_path).stem
+    return all((output_dir / f"{base_name}_{view.name}.png").exists() for view in view_specs)
+
+
 def _merge_dataset_parts(output_dir: Path, worker_ids: list[int]) -> dict[str, Any]:
     merged: dict[str, Any] = {}
     dataset_json = output_dir / "dataset.json"
@@ -311,9 +316,7 @@ def generate_dataset(config: DatasetGenerationConfig) -> dict[str, Any]:
     if config.resume:
         pending_meshes = []
         for mesh_path in mesh_files:
-            base_name = Path(mesh_path).name.replace(".stl", "")
-            expected_output = output_dir / f"{base_name}_AP.png"
-            if not expected_output.exists():
+            if not _mesh_outputs_complete(output_dir, mesh_path, config.views):
                 pending_meshes.append(mesh_path)
         mesh_files = pending_meshes
 

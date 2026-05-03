@@ -15,10 +15,11 @@ from scipy.ndimage import distance_transform_edt
 class ProjectionDataset:
     """Dataset of multi-view projections (X-rays) and associated geometry."""
 
-    def __init__(self, root_dir: str | Path, compute_dt: bool = True):
+    def __init__(self, root_dir: str | Path, compute_dt: bool = True, cache_cases: bool = True):
         self.root_dir = Path(root_dir)
         self.manifest_path = self.root_dir / "dataset.json"
         self.compute_dt = compute_dt
+        self.cache_cases = cache_cases
         
         if not self.manifest_path.exists():
             if (self.root_dir / "manifest.json").exists():
@@ -37,12 +38,16 @@ class ProjectionDataset:
             
         self.case_ids = sorted(list(self.cases_dict.keys()))
         self.dt_cache = {} # Cache for distance transforms
+        self.case_cache: dict[int, dict[str, Any]] = {}
         
     def __len__(self) -> int:
         return len(self.case_ids)
         
     def get_case(self, index: int) -> dict[str, Any]:
         """Get a specific case by index."""
+        if self.cache_cases and index in self.case_cache:
+            return self.case_cache[index]
+
         case_id = self.case_ids[index]
         views_meta = self.cases_dict[case_id]
         
@@ -56,7 +61,7 @@ class ProjectionDataset:
                 "name": meta["view_name"],
                 "image": image_np,
                 "angles": meta["angles_deg"],
-                "projection_matrix": meta["projection_matrix"]
+                "projection_matrix": meta["projection_matrix"],
             }
             
             if self.compute_dt:
@@ -79,7 +84,10 @@ class ProjectionDataset:
                 
             views.append(view_data)
             
-        return {
+        case_data = {
             "case_id": case_id,
-            "views": views
+            "views": views,
         }
+        if self.cache_cases:
+            self.case_cache[index] = case_data
+        return case_data

@@ -100,9 +100,9 @@ class PINN_GS(nn.Module):
     Hybrid model combining PINN and GS.
     """
 
-    def __init__(self, num_gaussians: int, pinn_config: dict):
+    def __init__(self, num_gaussians: int, pinn_config: dict, sh_degree: int = 3):
         super().__init__()
-        self.gs = GaussianSplatting(num_gaussians)
+        self.gs = GaussianSplatting(num_gaussians, sh_degree=sh_degree)
         self.pinn = PINN(**pinn_config)
 
     def get_view_matrix(self, lao: float, cran: float, device: str = "cpu") -> torch.Tensor:
@@ -128,7 +128,11 @@ class PINN_GS(nn.Module):
         
         return rz @ ry
 
-    def project_points(self, view_matrix: torch.Tensor, img_size: int = 1024) -> torch.Tensor:
+    def project_points(
+        self,
+        view_matrix: torch.Tensor,
+        projection_matrix: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Project Gaussian centers to 2D image coordinates.
         Matches gVXR Source(-600) -> Center(0) -> Detector(400) geometry.
@@ -140,23 +144,18 @@ class PINN_GS(nn.Module):
         # view_matrix is [4, 4]
         xyz_cam = (xyz_hom @ view_matrix.T)[:, :3]
         
-        # Perspective projection along X-axis
-        # x_dist = x_cam + 600
-        # u = 1000 * y_cam / x_dist
-        # v = 1000 * (-z_cam) / x_dist
+        # Perspective projection along X-axis using the same geometry as dataset generation.
         x_dist = xyz_cam[:, 0] + 600.0
-        
-        # Avoid division by zero
         x_dist = torch.clamp(x_dist, min=1.0)
-        
-        u = (1000.0 * xyz_cam[:, 1]) / x_dist
-        v = (1000.0 * (-xyz_cam[:, 2])) / x_dist
-        
-        # Scale to pixels: detector is 300mm wide
-        # pixel_coords = (proj / 150) * 512 + 512
-        u_pix = (u / 150.0) * (img_size / 2.0) + (img_size / 2.0)
-        v_pix = (v / 150.0) * (img_size / 2.0) + (img_size / 2.0)
-        
+
+        focal_x = projection_matrix[0, 0]
+        focal_y = projection_matrix[1, 1]
+        center_x = projection_matrix[0, 2]
+        center_y = projection_matrix[1, 2]
+
+        u_pix = (focal_x * xyz_cam[:, 1]) / x_dist + center_x
+        v_pix = (focal_y * (-xyz_cam[:, 2])) / x_dist + center_y
+
         return torch.stack([u_pix, v_pix], dim=-1)
 
     def forward(self, x, y, z, t):

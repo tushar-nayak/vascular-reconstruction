@@ -41,10 +41,14 @@ class TrainingConfig(BaseConfig):
     experiment_name: str = "default"
     iterations: int = 30000
     learning_rate: float = 0.001
+    pinn_learning_rate: float = 0.0001
+    physics_loss_weight: float = 0.05
     save_interval: int = 5000
     eval_interval: int = 1000
     checkpoint_dir: str = "checkpoints"
     log_dir: str = "logs"
+    device: str = "auto"
+    max_failures: int = 5
 
 
 @dataclass
