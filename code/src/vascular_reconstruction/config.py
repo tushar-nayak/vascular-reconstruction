@@ -57,8 +57,13 @@ class TrainingConfig(BaseConfig):
     mask_dice_weight: float = 0.3
     outside_mask_weight: float = 0.5
     mass_match_weight: float = 0.1
+    continuity_weight: float = 0.02
+    continuity_knn: int = 6
+    continuity_max_distance: float = 3.5
     render_image_size: int = 128
     gaussian_chunk_size: int = 512
+    render_min_sigma: float = 0.12
+    render_max_sigma: float = 4.0
     physics_warmup_iterations: int = 5000
     save_interval: int = 5000
     eval_interval: int = 1000

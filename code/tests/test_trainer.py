@@ -100,6 +100,8 @@ def test_silhouette_renderer_returns_soft_mask(tmp_path):
         source_image_size=view["vessel_mask"].shape,
         render_size=16,
         chunk_size=8,
+        min_sigma=0.05,
+        max_sigma=2.0,
     )
     target = downsample_mask(torch.from_numpy(view["vessel_mask"]), 16)
 
@@ -107,6 +109,29 @@ def test_silhouette_renderer_returns_soft_mask(tmp_path):
     assert torch.all(rendered >= 0.0)
     assert torch.all(rendered <= 1.0)
     assert target.shape == (16, 16)
+
+
+def test_silhouette_renderer_keeps_scale_gradients_near_sigma_floor(tmp_path):
+    trainer = _build_trainer(tmp_path, num_gaussians=8)
+    view = trainer.case_data["views"][0]
+    view_matrix = trainer.model.get_view_matrix(0.0, 0.0, device="cpu")
+    projection_matrix = torch.tensor(view["projection_matrix"], dtype=torch.float32)
+
+    trainer.model.gs._scaling.grad = None
+    rendered = render_gaussian_silhouette(
+        model=trainer.model,
+        view_matrix=view_matrix,
+        projection_matrix=projection_matrix,
+        source_image_size=view["vessel_mask"].shape,
+        render_size=16,
+        chunk_size=8,
+        min_sigma=0.5,
+        max_sigma=2.0,
+    )
+    rendered.mean().backward()
+
+    assert trainer.model.gs._scaling.grad is not None
+    assert torch.count_nonzero(trainer.model.gs._scaling.grad).item() > 0
 
 
 def test_train_step_writes_debug_projection(tmp_path):
@@ -118,5 +143,6 @@ def test_train_step_writes_debug_projection(tmp_path):
     assert phys == 0.0
     assert reg >= 0.0
     assert stats["xyz_std_mean"] > 0.0
+    assert "continuity" in stats
     debug_files = sorted((tmp_path / "debug").glob("*.png"))
     assert len(debug_files) == 1

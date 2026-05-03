@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from math import ceil
 from pathlib import Path
 
 import numpy as np
@@ -181,6 +182,12 @@ class Trainer:
         axis_std = torch.std(xyz, dim=0)
         std_floor = torch.relu(self.config.axis_std_floor - axis_std).pow(2).mean()
 
+        continuity = torch.tensor(0.0, device=xyz.device)
+        knn_k = min(self.config.continuity_knn + 1, sample_count)
+        if knn_k > 1:
+            knn_distances = torch.topk(pairwise_dist, k=knn_k, largest=False).values[:, 1:]
+            continuity = torch.relu(knn_distances - self.config.continuity_max_distance).pow(2).mean()
+
         opacity_mean = opacity.mean()
         opacity_reg = (opacity_mean - self.config.opacity_mean_target).pow(2)
 
@@ -190,34 +197,59 @@ class Trainer:
         total_reg = (
             self.config.repulsion_weight * repulsion
             + self.config.std_floor_weight * std_floor
+            + self.config.continuity_weight * continuity
             + self.config.opacity_weight * opacity_reg
             + self.config.scale_weight * scale_reg
         )
         stats = {
             "repulsion": float(repulsion.item()),
             "std_floor": float(std_floor.item()),
+            "continuity": float(continuity.item()),
             "opacity_mean": float(opacity_mean.item()),
             "scale_mean": float(scaling_mean.item()),
             "xyz_std_mean": float(axis_std.mean().item()),
         }
         return total_reg, stats
 
-    def _save_debug_projection(self, iteration: int, rendered_view: torch.Tensor, target_view: torch.Tensor) -> None:
+    def _save_debug_projection(
+        self,
+        iteration: int,
+        rendered_views: list[torch.Tensor],
+        target_views: list[torch.Tensor],
+    ) -> None:
         if iteration % self.config.debug_projection_interval != 0:
             return
 
-        rendered_np = (rendered_view.detach().cpu().numpy() * 255.0).astype(np.uint8)
-        target_np = (target_view.detach().cpu().numpy() * 255.0).astype(np.uint8)
-        overlay = np.stack([rendered_np, target_np, np.zeros_like(rendered_np)], axis=-1)
-        Image.fromarray(overlay).save(self.debug_projection_dir / f"iter_{iteration:06d}_{self.case_id}.png")
+        overlays = []
+        for rendered_view, target_view in zip(rendered_views, target_views, strict=False):
+            rendered_np = (rendered_view.detach().cpu().numpy() * 255.0).astype(np.uint8)
+            target_np = (target_view.detach().cpu().numpy() * 255.0).astype(np.uint8)
+            overlays.append(np.stack([rendered_np, target_np, np.zeros_like(rendered_np)], axis=-1))
+
+        if not overlays:
+            return
+
+        tile_height, tile_width, _ = overlays[0].shape
+        columns = min(3, len(overlays))
+        rows = ceil(len(overlays) / columns)
+        canvas = np.zeros((rows * tile_height, columns * tile_width, 3), dtype=np.uint8)
+
+        for index, overlay in enumerate(overlays):
+            row = index // columns
+            col = index % columns
+            y0 = row * tile_height
+            x0 = col * tile_width
+            canvas[y0 : y0 + tile_height, x0 : x0 + tile_width] = overlay
+
+        Image.fromarray(canvas).save(self.debug_projection_dir / f"iter_{iteration:06d}_{self.case_id}.png")
 
     def train_step(self, iteration: int) -> tuple[float, float, float, float, dict[str, float]]:
         self.gs_optimizer.zero_grad()
         self.pinn_optimizer.zero_grad()
 
         total_silhouette_loss = torch.tensor(0.0, device=self.device)
-        first_rendered: torch.Tensor | None = None
-        first_target: torch.Tensor | None = None
+        rendered_views: list[torch.Tensor] = []
+        target_views: list[torch.Tensor] = []
 
         for view_index, view in enumerate(self.case_data["views"]):
             lao, cran = view["angles"]
@@ -233,10 +265,12 @@ class Trainer:
                 source_image_size=vessel_mask.shape,
                 render_size=self.config.render_image_size,
                 chunk_size=self.config.gaussian_chunk_size,
+                min_sigma=self.config.render_min_sigma,
+                max_sigma=self.config.render_max_sigma,
             )
-            if view_index == 0:
-                first_rendered = rendered
-                first_target = target_mask
+            if view_index < 6:
+                rendered_views.append(rendered)
+                target_views.append(target_mask)
 
             total_silhouette_loss += self._silhouette_loss(rendered, target_mask)
 
@@ -264,9 +298,9 @@ class Trainer:
         if iteration >= self.config.physics_warmup_iterations:
             self.pinn_optimizer.step()
 
-        if first_rendered is None or first_target is None:
+        if not rendered_views or not target_views:
             raise RuntimeError("No rendered projection was produced.")
-        self._save_debug_projection(iteration, first_rendered, first_target)
+        self._save_debug_projection(iteration, rendered_views, target_views)
 
         return total_loss.item(), loss_image.item(), loss_physics.item(), loss_reg.item(), reg_stats
 

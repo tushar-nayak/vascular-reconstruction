@@ -27,6 +27,8 @@ def render_gaussian_silhouette(
     source_image_size: tuple[int, int],
     render_size: int,
     chunk_size: int = 512,
+    min_sigma: float = 0.12,
+    max_sigma: float = 4.0,
 ) -> torch.Tensor:
     """Render a soft silhouette by splatting projected Gaussians onto a low-resolution image."""
     scaled_projection = _scaled_projection_matrix(projection_matrix, source_image_size, render_size)
@@ -35,7 +37,18 @@ def render_gaussian_silhouette(
     scaling = model.gs.get_scaling
     world_radius = torch.mean(scaling[:, 1:], dim=-1)
     focal = 0.5 * (scaled_projection[0, 0] + scaled_projection[1, 1])
-    screen_sigma = torch.clamp((focal * world_radius) / x_dist, min=0.35, max=2.0)
+    raw_sigma = (focal * world_radius) / x_dist
+    # Use a leaky clamp so sigma keeps gradients near the bounds instead of freezing.
+    screen_sigma = torch.where(
+        raw_sigma < min_sigma,
+        min_sigma + 0.25 * (raw_sigma - min_sigma),
+        raw_sigma,
+    )
+    screen_sigma = torch.where(
+        screen_sigma > max_sigma,
+        max_sigma + 0.25 * (screen_sigma - max_sigma),
+        screen_sigma,
+    ).clamp_min(1e-3)
     weights = model.gs.get_opacity.squeeze(-1)
 
     grid_y, grid_x = torch.meshgrid(
