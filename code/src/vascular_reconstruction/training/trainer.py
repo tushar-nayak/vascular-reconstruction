@@ -188,6 +188,18 @@ class Trainer:
             knn_distances = torch.topk(pairwise_dist, k=knn_k, largest=False).values[:, 1:]
             continuity = torch.relu(knn_distances - self.config.continuity_max_distance).pow(2).mean()
 
+        line_structure = torch.tensor(0.0, device=xyz.device)
+        line_knn_k = min(self.config.line_structure_knn + 1, sample_count)
+        if line_knn_k > 2:
+            knn_indices = torch.topk(pairwise_dist, k=line_knn_k, largest=False).indices[:, 1:]
+            neighbors = sampled_xyz[knn_indices]
+            offsets = neighbors - sampled_xyz.unsqueeze(1)
+            covariance = offsets.transpose(1, 2) @ offsets / max(line_knn_k - 1, 1)
+            eigenvalues = torch.linalg.eigvalsh(covariance)
+            transverse_energy = eigenvalues[:, 0] + eigenvalues[:, 1]
+            total_energy = eigenvalues.sum(dim=-1) + 1e-6
+            line_structure = (transverse_energy / total_energy).mean()
+
         opacity_mean = opacity.mean()
         opacity_reg = (opacity_mean - self.config.opacity_mean_target).pow(2)
 
@@ -198,6 +210,7 @@ class Trainer:
             self.config.repulsion_weight * repulsion
             + self.config.std_floor_weight * std_floor
             + self.config.continuity_weight * continuity
+            + self.config.line_structure_weight * line_structure
             + self.config.opacity_weight * opacity_reg
             + self.config.scale_weight * scale_reg
         )
@@ -205,6 +218,7 @@ class Trainer:
             "repulsion": float(repulsion.item()),
             "std_floor": float(std_floor.item()),
             "continuity": float(continuity.item()),
+            "line_structure": float(line_structure.item()),
             "opacity_mean": float(opacity_mean.item()),
             "scale_mean": float(scaling_mean.item()),
             "xyz_std_mean": float(axis_std.mean().item()),

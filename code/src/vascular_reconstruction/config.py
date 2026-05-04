@@ -60,6 +60,8 @@ class TrainingConfig(BaseConfig):
     continuity_weight: float = 0.02
     continuity_knn: int = 6
     continuity_max_distance: float = 3.5
+    line_structure_weight: float = 0.05
+    line_structure_knn: int = 8
     render_image_size: int = 128
     gaussian_chunk_size: int = 512
     render_min_sigma: float = 0.12

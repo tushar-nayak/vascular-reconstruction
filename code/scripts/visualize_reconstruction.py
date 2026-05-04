@@ -13,6 +13,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components, minimum_spanning_tree
+from scipy.spatial import cKDTree
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -59,7 +62,10 @@ def _prepare_mesh_vertices(mesh_path: Path | None) -> np.ndarray | None:
     if mesh_path is None or not mesh_path.exists():
         return None
 
-    import trimesh
+    try:
+        import trimesh
+    except ModuleNotFoundError:
+        return None
 
     mesh = trimesh.load(mesh_path, process=False)
     mesh.apply_translation(-mesh.bounding_box.centroid)
@@ -83,22 +89,61 @@ def _robust_limits(points: np.ndarray, a_idx: int, b_idx: int) -> tuple[tuple[fl
     return (a_low - a_margin, a_high + a_margin), (b_low - b_margin, b_high + b_margin)
 
 
-def _split_clusters(xyz: np.ndarray) -> tuple[np.ndarray, np.ndarray, int, float]:
-    axis = int(np.argmax(np.std(xyz, axis=0)))
-    sorted_values = np.sort(xyz[:, axis])
-    gaps = np.diff(sorted_values)
-    split_idx = int(np.argmax(gaps))
-    split_gap = float(gaps[split_idx])
-    threshold = float((sorted_values[split_idx] + sorted_values[split_idx + 1]) / 2.0)
-    mask = xyz[:, axis] <= threshold
-    return mask, ~mask, axis, split_gap
+def _build_graph_diagnostics(points: np.ndarray, knn: int = 6) -> dict[str, object]:
+    sample = _sample_points(points, max_points=3500, seed=11)
+    tree = cKDTree(sample)
+    distances, indices = tree.query(sample, k=min(knn + 1, len(sample)))
+
+    if distances.ndim == 1:
+        distances = distances[:, None]
+        indices = indices[:, None]
+
+    neighbor_distances = distances[:, 1:]
+    neighbor_indices = indices[:, 1:]
+
+    rows = np.repeat(np.arange(len(sample)), neighbor_indices.shape[1])
+    cols = neighbor_indices.reshape(-1)
+    data = neighbor_distances.reshape(-1)
+    adjacency = csr_matrix((data, (rows, cols)), shape=(len(sample), len(sample)))
+    adjacency = adjacency.minimum(adjacency.T)
+
+    component_count, labels = connected_components(adjacency, directed=False)
+    mst = minimum_spanning_tree(adjacency)
+    mst_lengths = mst.data
+
+    offsets = sample[neighbor_indices] - sample[:, None, :]
+    covariance = np.einsum("nki,nkj->nij", offsets, offsets) / max(offsets.shape[1], 1)
+    eigenvalues = np.linalg.eigvalsh(covariance)
+    line_scores = 1.0 - ((eigenvalues[:, 0] + eigenvalues[:, 1]) / (eigenvalues.sum(axis=1) + 1e-6))
+
+    component_sizes = np.bincount(labels, minlength=component_count)
+    largest_component = int(component_sizes.max()) if len(component_sizes) else 0
+
+    return {
+        "sample": sample,
+        "adjacency": adjacency,
+        "labels": labels,
+        "component_count": int(component_count),
+        "largest_component_fraction": float(largest_component / max(len(sample), 1)),
+        "neighbor_distance_mean": float(neighbor_distances.mean()),
+        "neighbor_distance_p95": float(np.percentile(neighbor_distances, 95)),
+        "mst_mean": float(mst_lengths.mean()) if len(mst_lengths) else 0.0,
+        "mst_p95": float(np.percentile(mst_lengths, 95)) if len(mst_lengths) else 0.0,
+        "line_score_mean": float(line_scores.mean()),
+        "line_scores": line_scores,
+    }
 
 
-def _cluster_summary(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    return points.mean(axis=0), points.std(axis=0)
-
-
-def _plot_density(ax, points: np.ndarray, mesh_vertices: np.ndarray | None, title: str, a_idx: int, b_idx: int, a_label: str, b_label: str) -> None:
+def _plot_density(
+    ax,
+    points: np.ndarray,
+    mesh_vertices: np.ndarray | None,
+    title: str,
+    a_idx: int,
+    b_idx: int,
+    a_label: str,
+    b_label: str,
+) -> None:
     limits = _robust_limits(points, a_idx, b_idx)
     ax.hexbin(points[:, a_idx], points[:, b_idx], gridsize=70, bins="log", cmap="inferno", mincnt=1)
     if mesh_vertices is not None:
@@ -113,41 +158,77 @@ def _plot_density(ax, points: np.ndarray, mesh_vertices: np.ndarray | None, titl
     ax.grid(False)
 
 
-def _plot_cluster(ax, points: np.ndarray, title: str, color: str) -> None:
-    pts = _sample_points(points, max_points=12000, seed=4)
-    limits = _robust_limits(pts, 0, 1)
-    ax.scatter(pts[:, 0], pts[:, 1], s=3, c=color, alpha=0.25, linewidths=0)
+def _plot_graph_projection(
+    ax,
+    sample: np.ndarray,
+    adjacency: csr_matrix,
+    labels: np.ndarray,
+    title: str,
+    a_idx: int,
+    b_idx: int,
+    a_label: str,
+    b_label: str,
+) -> None:
+    limits = _robust_limits(sample, a_idx, b_idx)
+    graph = adjacency.tocoo()
+    if graph.nnz:
+        edge_mask = graph.row < graph.col
+        for start, end in zip(graph.row[edge_mask], graph.col[edge_mask], strict=False):
+            ax.plot(
+                [sample[start, a_idx], sample[end, a_idx]],
+                [sample[start, b_idx], sample[end, b_idx]],
+                color="#adb5bd",
+                alpha=0.06,
+                linewidth=0.4,
+            )
+    scatter = ax.scatter(
+        sample[:, a_idx],
+        sample[:, b_idx],
+        c=labels,
+        cmap="tab20",
+        s=4,
+        alpha=0.7,
+        linewidths=0,
+    )
+    scatter.set_clim(0, max(int(labels.max()), 1))
     ax.set_title(title)
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
+    ax.set_xlabel(a_label)
+    ax.set_ylabel(b_label)
     ax.set_xlim(limits[0])
     ax.set_ylim(limits[1])
     ax.set_aspect("equal", adjustable="box")
     ax.grid(False)
 
 
-def _plot_summary(ax, cluster_a: np.ndarray, cluster_b: np.ndarray, axis: int, split_gap: float) -> None:
-    center_a, std_a = _cluster_summary(cluster_a)
-    center_b, std_b = _cluster_summary(cluster_b)
-    separation = float(np.linalg.norm(center_a - center_b))
+def _plot_line_score_hist(ax, line_scores: np.ndarray) -> None:
+    ax.hist(line_scores, bins=30, color="#ff922b", alpha=0.9)
+    ax.set_title("Local Line-Likeness")
+    ax.set_xlabel("1 = line-like, 0 = blob-like")
+    ax.set_ylabel("Count")
+    ax.grid(False)
+
+
+def _plot_summary(ax, checkpoint: dict[str, object], xyz: np.ndarray, diagnostics: dict[str, object]) -> None:
+    center = xyz.mean(axis=0)
+    std = xyz.std(axis=0)
     lines = [
-        "Cluster Summary",
+        f"Checkpoint {checkpoint['iteration']}",
         "",
-        f"A count: {len(cluster_a):,}",
-        f"B count: {len(cluster_b):,}",
-        f"Split axis: {'XYZ'[axis]}",
-        f"Gap on split axis: {split_gap:.3f}",
-        f"Centroid distance: {separation:.3f}",
+        f"Points: {len(xyz):,}",
+        f"Center: [{center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}]",
+        f"Std:    [{std[0]:.2f}, {std[1]:.2f}, {std[2]:.2f}]",
         "",
-        f"A center: [{center_a[0]:.2f}, {center_a[1]:.2f}, {center_a[2]:.2f}]",
-        f"A std:    [{std_a[0]:.3f}, {std_a[1]:.3f}, {std_a[2]:.3f}]",
-        "",
-        f"B center: [{center_b[0]:.2f}, {center_b[1]:.2f}, {center_b[2]:.2f}]",
-        f"B std:    [{std_b[0]:.3f}, {std_b[1]:.3f}, {std_b[2]:.3f}]",
+        f"Graph components: {diagnostics['component_count']}",
+        f"Largest component frac: {diagnostics['largest_component_fraction']:.3f}",
+        f"kNN mean dist: {diagnostics['neighbor_distance_mean']:.3f}",
+        f"kNN p95 dist: {diagnostics['neighbor_distance_p95']:.3f}",
+        f"MST mean edge: {diagnostics['mst_mean']:.3f}",
+        f"MST p95 edge: {diagnostics['mst_p95']:.3f}",
+        f"Mean line score: {diagnostics['line_score_mean']:.3f}",
         "",
         "Interpretation:",
-        "This checkpoint is collapsed into two tight modes,",
-        "not a continuous vascular geometry.",
+        "Higher line score and one dominant component",
+        "are better proxies for vessel-like 3D structure.",
     ]
     ax.axis("off")
     ax.text(0.0, 1.0, "\n".join(lines), va="top", ha="left", family="monospace", fontsize=10)
@@ -158,20 +239,29 @@ def visualize_checkpoint(checkpoint_path: Path, output_dir: Path, mesh_path: Pat
     checkpoint, model = _load_model_from_checkpoint(checkpoint_path)
     xyz = model.gs.get_xyz.detach().cpu().numpy()
     mesh_vertices = _prepare_mesh_vertices(mesh_path)
-    cluster_a_mask, cluster_b_mask, axis, split_gap = _split_clusters(xyz)
-    cluster_a = xyz[cluster_a_mask]
-    cluster_b = xyz[cluster_b_mask]
+    diagnostics = _build_graph_diagnostics(xyz)
 
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10), constrained_layout=True)
+    fig, axes = plt.subplots(3, 3, figsize=(16, 14), constrained_layout=True)
     fig.suptitle(f"Checkpoint {checkpoint['iteration']} Geometry Diagnostics", fontsize=18)
 
     for col, (title, a_idx, b_idx, a_label, b_label) in enumerate(PROJECTIONS):
         panel_title = title if mesh_vertices is None else f"{title} (blue = GT)"
         _plot_density(axes[0, col], xyz, mesh_vertices, panel_title, a_idx, b_idx, a_label, b_label)
+        _plot_graph_projection(
+            axes[1, col],
+            diagnostics["sample"],
+            diagnostics["adjacency"],
+            diagnostics["labels"],
+            f"{a_label}{b_label} kNN Graph",
+            a_idx,
+            b_idx,
+            a_label,
+            b_label,
+        )
 
-    _plot_cluster(axes[1, 0], cluster_a, f"Cluster A XY ({len(cluster_a):,} points)", "#ff3b30")
-    _plot_cluster(axes[1, 1], cluster_b, f"Cluster B XY ({len(cluster_b):,} points)", "#ffd60a")
-    _plot_summary(axes[1, 2], cluster_a, cluster_b, axis, split_gap)
+    _plot_line_score_hist(axes[2, 0], diagnostics["line_scores"])
+    _plot_summary(axes[2, 1], checkpoint, xyz, diagnostics)
+    axes[2, 2].axis("off")
 
     output_path = output_dir / f"reconstruction_comparison_iter_{checkpoint['iteration']}.png"
     fig.savefig(output_path, dpi=220, bbox_inches="tight")

@@ -102,6 +102,42 @@ def test_geometry_regularization_penalizes_collapsed_points(tmp_path):
     assert stats["xyz_std_mean"] == 0.0
 
 
+def test_line_structure_penalty_prefers_line_over_blob(tmp_path):
+    trainer = _build_trainer(tmp_path, num_gaussians=8)
+
+    line_points = torch.stack(
+        [
+            torch.linspace(-4.0, 4.0, steps=8),
+            torch.zeros(8),
+            torch.zeros(8),
+        ],
+        dim=-1,
+    )
+    blob_points = torch.tensor(
+        [
+            [-1.0, -1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, 1.0, 1.0],
+            [1.0, -1.0, -1.0],
+            [1.0, -1.0, 1.0],
+            [1.0, 1.0, -1.0],
+            [1.0, 1.0, 1.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    with torch.no_grad():
+        trainer.model.gs._xyz.copy_(line_points)
+    _, line_stats = trainer._geometry_regularization()
+
+    with torch.no_grad():
+        trainer.model.gs._xyz.copy_(blob_points)
+    _, blob_stats = trainer._geometry_regularization()
+
+    assert line_stats["line_structure"] < blob_stats["line_structure"]
+
+
 def test_silhouette_renderer_returns_soft_mask(tmp_path):
     trainer = _build_trainer(tmp_path, num_gaussians=8)
     view = trainer.case_data["views"][0]
@@ -159,5 +195,6 @@ def test_train_step_writes_debug_projection(tmp_path):
     assert reg >= 0.0
     assert stats["xyz_std_mean"] > 0.0
     assert "continuity" in stats
+    assert "line_structure" in stats
     debug_files = sorted((tmp_path / "debug").glob("*.png"))
     assert len(debug_files) == 1
