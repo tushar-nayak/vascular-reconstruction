@@ -138,6 +138,31 @@ def test_line_structure_penalty_prefers_line_over_blob(tmp_path):
     assert line_stats["line_structure"] < blob_stats["line_structure"]
 
 
+def test_active_gaussian_schedule_changes_count(tmp_path):
+    trainer = _build_trainer(tmp_path, num_gaussians=16)
+    trainer.config.active_gaussian_schedule = [[0, 4], [10, 12]]
+
+    assert trainer._active_gaussian_count(0) == 4
+    assert trainer._active_gaussian_count(9) == 4
+    assert trainer._active_gaussian_count(10) == 12
+
+
+def test_skeleton_loss_prefers_thin_centerline(tmp_path):
+    trainer = _build_trainer(tmp_path, num_gaussians=8)
+    target_mask = torch.zeros((16, 16), dtype=torch.float32)
+    target_mask[:, 7:9] = 1.0
+    skeleton_mask = torch.zeros((16, 16), dtype=torch.float32)
+    skeleton_mask[:, 8] = 1.0
+
+    thin_render = skeleton_mask.clone()
+    thick_render = target_mask.clone()
+
+    thin_loss = trainer._skeleton_loss(thin_render, target_mask, skeleton_mask)
+    thick_loss = trainer._skeleton_loss(thick_render, target_mask, skeleton_mask)
+
+    assert thin_loss.item() < thick_loss.item()
+
+
 def test_silhouette_renderer_returns_soft_mask(tmp_path):
     trainer = _build_trainer(tmp_path, num_gaussians=8)
     view = trainer.case_data["views"][0]

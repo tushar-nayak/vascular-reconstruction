@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Type, TypeVar
 
@@ -55,6 +55,9 @@ class TrainingConfig(BaseConfig):
     silhouette_loss_weight: float = 1.0
     mask_bce_weight: float = 0.7
     mask_dice_weight: float = 0.3
+    skeleton_loss_weight: float = 0.15
+    skeleton_focus_weight: float = 0.7
+    skeleton_thickness_weight: float = 0.3
     outside_mask_weight: float = 0.5
     mass_match_weight: float = 0.1
     continuity_weight: float = 0.02
@@ -75,6 +78,7 @@ class TrainingConfig(BaseConfig):
     debug_projection_interval: int = 1000
     device: str = "auto"
     max_failures: int = 5
+    active_gaussian_schedule: list[list[int]] = field(default_factory=list)
     init_from_case_index: int = 0
     init_depth_mm: float = 8.0
     init_jitter_mm: float = 1.5

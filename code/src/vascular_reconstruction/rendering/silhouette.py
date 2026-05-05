@@ -26,6 +26,7 @@ def render_gaussian_silhouette(
     projection_matrix: torch.Tensor,
     source_image_size: tuple[int, int],
     render_size: int,
+    active_indices: torch.Tensor | None = None,
     chunk_size: int = 512,
     min_sigma: float = 0.12,
     max_sigma: float = 4.0,
@@ -34,7 +35,13 @@ def render_gaussian_silhouette(
     scaled_projection = _scaled_projection_matrix(projection_matrix, source_image_size, render_size)
     projected_coords, x_dist = model.project_gaussians(view_matrix, scaled_projection)
 
+    if active_indices is not None:
+        projected_coords = projected_coords[active_indices]
+        x_dist = x_dist[active_indices]
+
     scaling = model.gs.get_scaling
+    if active_indices is not None:
+        scaling = scaling[active_indices]
     world_radius = torch.mean(scaling[:, 1:], dim=-1)
     focal = 0.5 * (scaled_projection[0, 0] + scaled_projection[1, 1])
     raw_sigma = (focal * world_radius) / x_dist
@@ -50,6 +57,8 @@ def render_gaussian_silhouette(
         screen_sigma,
     ).clamp_min(1e-3)
     weights = model.gs.get_opacity.squeeze(-1)
+    if active_indices is not None:
+        weights = weights[active_indices]
 
     grid_y, grid_x = torch.meshgrid(
         torch.arange(render_size, device=projected_coords.device, dtype=projected_coords.dtype),

@@ -167,10 +167,39 @@ class Trainer:
             + self.config.mass_match_weight * mass_match
         )
 
-    def _geometry_regularization(self) -> tuple[torch.Tensor, dict[str, float]]:
-        xyz = self.model.gs.get_xyz
-        opacity = self.model.gs.get_opacity.squeeze(-1)
-        scaling = self.model.gs.get_scaling
+    def _skeleton_loss(
+        self,
+        rendered: torch.Tensor,
+        target_mask: torch.Tensor,
+        skeleton_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        skeleton_focus = -(torch.log(rendered.clamp_min(1e-5)) * skeleton_mask).sum() / (skeleton_mask.sum() + 1e-5)
+        vessel_shell = torch.clamp(target_mask - skeleton_mask, min=0.0)
+        thickness_penalty = torch.mean(rendered * vessel_shell)
+        return (
+            self.config.skeleton_focus_weight * skeleton_focus
+            + self.config.skeleton_thickness_weight * thickness_penalty
+        )
+
+    def _active_gaussian_count(self, iteration: int) -> int:
+        if not self.config.active_gaussian_schedule:
+            return self.model_config.num_gaussians
+
+        active_count = self.model_config.num_gaussians
+        for start_iteration, count in self.config.active_gaussian_schedule:
+            if iteration >= int(start_iteration):
+                active_count = int(count)
+        return min(max(active_count, 1), self.model_config.num_gaussians)
+
+    def _active_gaussian_indices(self, iteration: int) -> torch.Tensor:
+        active_count = self._active_gaussian_count(iteration)
+        opacity = self.model.gs.get_opacity.squeeze(-1).detach()
+        return torch.topk(opacity, k=active_count, largest=True).indices
+
+    def _geometry_regularization(self, iteration: int, active_indices: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
+        xyz = self.model.gs.get_xyz[active_indices]
+        opacity = self.model.gs.get_opacity.squeeze(-1)[active_indices]
+        scaling = self.model.gs.get_scaling[active_indices]
 
         sample_count = min(self.config.repulsion_num_samples, len(xyz))
         sample_idx = torch.randperm(len(xyz), device=xyz.device)[:sample_count]
@@ -215,6 +244,7 @@ class Trainer:
             + self.config.scale_weight * scale_reg
         )
         stats = {
+            "active_gaussians": float(len(active_indices)),
             "repulsion": float(repulsion.item()),
             "std_floor": float(std_floor.item()),
             "continuity": float(continuity.item()),
@@ -262,8 +292,10 @@ class Trainer:
         self.pinn_optimizer.zero_grad()
 
         total_silhouette_loss = torch.tensor(0.0, device=self.device)
+        total_skeleton_loss = torch.tensor(0.0, device=self.device)
         rendered_views: list[torch.Tensor] = []
         target_views: list[torch.Tensor] = []
+        active_indices = self._active_gaussian_indices(iteration)
 
         for view_index, view in enumerate(self.case_data["views"]):
             lao, cran = view["angles"]
@@ -271,6 +303,8 @@ class Trainer:
             projection_matrix = self._projection_matrix_from_view(view, self.device)
             vessel_mask = torch.from_numpy(np.asarray(view["vessel_mask"], dtype=np.float32)).to(self.device)
             target_mask = downsample_mask(vessel_mask, self.config.render_image_size)
+            skeleton_mask_np = skeletonize(np.asarray(view["vessel_mask"], dtype=bool)).astype(np.float32)
+            skeleton_mask = downsample_mask(torch.from_numpy(skeleton_mask_np).to(self.device), self.config.render_image_size)
 
             rendered = render_gaussian_silhouette(
                 model=self.model,
@@ -278,6 +312,7 @@ class Trainer:
                 projection_matrix=projection_matrix,
                 source_image_size=vessel_mask.shape,
                 render_size=self.config.render_image_size,
+                active_indices=active_indices,
                 chunk_size=self.config.gaussian_chunk_size,
                 min_sigma=self.config.render_min_sigma,
                 max_sigma=self.config.render_max_sigma,
@@ -287,9 +322,11 @@ class Trainer:
                 target_views.append(target_mask)
 
             total_silhouette_loss += self._silhouette_loss(rendered, target_mask)
+            total_skeleton_loss += self._skeleton_loss(rendered, target_mask, skeleton_mask)
 
         loss_image = total_silhouette_loss / len(self.case_data["views"])
-        loss_reg, reg_stats = self._geometry_regularization()
+        loss_skeleton = total_skeleton_loss / len(self.case_data["views"])
+        loss_reg, reg_stats = self._geometry_regularization(iteration, active_indices)
 
         if iteration >= self.config.physics_warmup_iterations:
             raw_coords = torch.rand(1024, 4, device=self.device, requires_grad=True)
@@ -303,6 +340,7 @@ class Trainer:
 
         total_loss = (
             self.config.silhouette_loss_weight * loss_image
+            + self.config.skeleton_loss_weight * loss_skeleton
             + self.config.physics_loss_weight * loss_physics
             + loss_reg
         )
@@ -316,6 +354,7 @@ class Trainer:
             raise RuntimeError("No rendered projection was produced.")
         self._save_debug_projection(iteration, rendered_views, target_views)
 
+        reg_stats["skeleton_loss"] = float(loss_skeleton.item())
         return total_loss.item(), loss_image.item(), loss_physics.item(), loss_reg.item(), reg_stats
 
     def train(self) -> None:
@@ -350,7 +389,8 @@ class Trainer:
                 if i % 10 == 0:
                     pbar.set_description(
                         "Loss: "
-                        f"{loss:.4f} | Sil: {l_img:.4f} | Phys: {l_phys:.4f} | Reg: {l_reg:.4f} "
+                        f"{loss:.4f} | Sil: {l_img:.4f} | Skel: {reg_stats['skeleton_loss']:.4f} "
+                        f"| Phys: {l_phys:.4f} | Reg: {l_reg:.4f} | Active: {int(reg_stats['active_gaussians'])} "
                         f"| XYZstd: {reg_stats['xyz_std_mean']:.2f}"
                     )
             except Exception as exc:
