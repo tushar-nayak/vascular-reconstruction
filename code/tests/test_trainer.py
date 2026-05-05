@@ -96,7 +96,8 @@ def test_geometry_regularization_penalizes_collapsed_points(tmp_path):
     with torch.no_grad():
         trainer.model.gs._xyz.fill_(0.0)
 
-    reg_loss, stats = trainer._geometry_regularization()
+    active_indices = torch.arange(8)
+    reg_loss, stats = trainer._geometry_regularization(0, active_indices)
     assert reg_loss.item() > 0.0
     assert stats["repulsion"] > 0.0
     assert stats["xyz_std_mean"] == 0.0
@@ -129,13 +130,55 @@ def test_line_structure_penalty_prefers_line_over_blob(tmp_path):
 
     with torch.no_grad():
         trainer.model.gs._xyz.copy_(line_points)
-    _, line_stats = trainer._geometry_regularization()
+    active_indices = torch.arange(8)
+    _, line_stats = trainer._geometry_regularization(0, active_indices)
 
     with torch.no_grad():
         trainer.model.gs._xyz.copy_(blob_points)
-    _, blob_stats = trainer._geometry_regularization()
+    _, blob_stats = trainer._geometry_regularization(0, active_indices)
 
     assert line_stats["line_structure"] < blob_stats["line_structure"]
+
+
+def test_graph_connectivity_penalty_prefers_connected_chain(tmp_path):
+    trainer = _build_trainer(tmp_path, num_gaussians=8)
+    trainer.config.graph_connectivity_weight = 1.0
+    trainer.config.graph_sample_size = 8
+    trainer.config.graph_edge_target = 2.0
+    active_indices = torch.arange(8)
+
+    chain_points = torch.stack(
+        [
+            torch.linspace(-7.0, 7.0, steps=8),
+            torch.zeros(8),
+            torch.zeros(8),
+        ],
+        dim=-1,
+    )
+    fragmented_points = torch.tensor(
+        [
+            [-12.0, 0.0, 0.0],
+            [-10.0, 0.0, 0.0],
+            [-8.0, 0.0, 0.0],
+            [-6.0, 0.0, 0.0],
+            [6.0, 0.0, 0.0],
+            [8.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [12.0, 0.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    with torch.no_grad():
+        trainer.model.gs._xyz.copy_(chain_points)
+    _, chain_stats = trainer._geometry_regularization(0, active_indices)
+
+    with torch.no_grad():
+        trainer.model.gs._xyz.copy_(fragmented_points)
+    _, fragmented_stats = trainer._geometry_regularization(0, active_indices)
+
+    assert chain_stats["graph_connectivity"] < fragmented_stats["graph_connectivity"]
+    assert chain_stats["graph_edge_p90"] < fragmented_stats["graph_edge_p90"]
 
 
 def test_active_gaussian_schedule_changes_count(tmp_path):
@@ -161,6 +204,102 @@ def test_skeleton_loss_prefers_thin_centerline(tmp_path):
     thick_loss = trainer._skeleton_loss(thick_render, target_mask, skeleton_mask)
 
     assert thin_loss.item() < thick_loss.item()
+
+
+def test_volume_thickness_loss_prefers_line_over_blob(tmp_path):
+    trainer = _build_trainer(tmp_path, num_gaussians=8)
+    trainer.config.volume_grid_size = 16
+    trainer.config.volume_sample_size = 8
+    active_indices = torch.arange(8)
+
+    line_points = torch.stack(
+        [
+            torch.linspace(-4.0, 4.0, steps=8),
+            torch.zeros(8),
+            torch.zeros(8),
+        ],
+        dim=-1,
+    )
+    blob_points = torch.tensor(
+        [
+            [-1.0, -1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, 1.0, 1.0],
+            [1.0, -1.0, -1.0],
+            [1.0, -1.0, 1.0],
+            [1.0, 1.0, -1.0],
+            [1.0, 1.0, 1.0],
+        ],
+        dtype=torch.float32,
+    )
+    with torch.no_grad():
+        trainer.model.gs._xyz.copy_(line_points)
+        trainer.model.gs._scaling.fill_(np.log(0.4))
+        trainer.model.gs._opacity.fill_(2.0)
+    line_loss, line_stats = trainer._volume_thickness_loss(active_indices)
+
+    with torch.no_grad():
+        trainer.model.gs._xyz.copy_(blob_points)
+    blob_loss, blob_stats = trainer._volume_thickness_loss(active_indices)
+
+    assert line_loss.item() < blob_loss.item()
+    assert line_stats["volume_core_fill"] < blob_stats["volume_core_fill"]
+
+
+def test_densify_clones_active_structure_into_inactive_slots(tmp_path):
+    trainer = _build_trainer(tmp_path, num_gaussians=8)
+    active_indices = torch.arange(4)
+
+    with torch.no_grad():
+        trainer.model.gs._xyz[:4] = torch.tensor(
+            [
+                [-4.0, 0.0, 0.0],
+                [-1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [4.0, 0.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        trainer.model.gs._xyz[4:] = 99.0
+        trainer.model.gs._opacity[:4] = 2.0
+        trainer.model.gs._opacity[4:] = -10.0
+        trainer.model.gs._scaling[:4] = np.log(0.5)
+
+    trainer._densify_to_count(active_indices, 8)
+
+    new_xyz = trainer.model.gs.get_xyz[4:].detach()
+    assert torch.all(new_xyz.abs() < 20.0)
+    assert torch.std(new_xyz[:, 0]).item() > 0.0
+
+
+def test_densify_targets_gap_edges(tmp_path):
+    trainer = _build_trainer(tmp_path, num_gaussians=8)
+    trainer.config.graph_sample_size = 4
+    trainer.config.densify_edge_knn = 1
+    trainer.config.densify_spacing_scale = 0.1
+    trainer.config.densify_jitter_scale = 0.01
+    active_indices = torch.arange(4)
+
+    with torch.no_grad():
+        trainer.model.gs._xyz[:4] = torch.tensor(
+            [
+                [-10.0, 0.0, 0.0],
+                [-9.0, 0.0, 0.0],
+                [9.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        trainer.model.gs._xyz[4:] = 99.0
+        trainer.model.gs._opacity[:4] = 2.0
+        trainer.model.gs._opacity[4:] = -10.0
+        trainer.model.gs._scaling[:4] = np.log(0.5)
+
+    trainer._densify_to_count(active_indices, 8)
+
+    new_x = trainer.model.gs.get_xyz[4:, 0].detach().cpu().numpy()
+    assert np.max(np.abs(new_x)) < 6.0
 
 
 def test_silhouette_renderer_returns_soft_mask(tmp_path):
@@ -221,5 +360,6 @@ def test_train_step_writes_debug_projection(tmp_path):
     assert stats["xyz_std_mean"] > 0.0
     assert "continuity" in stats
     assert "line_structure" in stats
+    assert "volume_core_fill" in stats
     debug_files = sorted((tmp_path / "debug").glob("*.png"))
     assert len(debug_files) == 1

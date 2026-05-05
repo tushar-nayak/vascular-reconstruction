@@ -58,11 +58,19 @@ class TrainingConfig(BaseConfig):
     skeleton_loss_weight: float = 0.15
     skeleton_focus_weight: float = 0.7
     skeleton_thickness_weight: float = 0.3
+    volume_thickness_weight: float = 0.03
+    volume_core_weight: float = 2.0
+    volume_grid_size: int = 24
+    volume_sample_size: int = 2048
+    volume_chunk_size: int = 256
     outside_mask_weight: float = 0.5
     mass_match_weight: float = 0.1
     continuity_weight: float = 0.02
     continuity_knn: int = 6
     continuity_max_distance: float = 3.5
+    graph_connectivity_weight: float = 0.0
+    graph_sample_size: int = 192
+    graph_edge_target: float = 2.5
     line_structure_weight: float = 0.05
     line_structure_knn: int = 8
     render_image_size: int = 128
@@ -79,6 +87,11 @@ class TrainingConfig(BaseConfig):
     device: str = "auto"
     max_failures: int = 5
     active_gaussian_schedule: list[list[int]] = field(default_factory=list)
+    densify_opacity_scale: float = 0.85
+    densify_scale_shrink: float = 0.7
+    densify_spacing_scale: float = 0.75
+    densify_jitter_scale: float = 0.2
+    densify_edge_knn: int = 4
     init_from_case_index: int = 0
     init_depth_mm: float = 8.0
     init_jitter_mm: float = 1.5

@@ -49,6 +49,7 @@ class Trainer:
         self.case_index = min(max(self.config.train_case_index, 0), len(self.dataset) - 1)
         self.case_data = self.dataset.get_case(self.case_index)
         self.case_id = str(self.case_data["case_id"])
+        self._last_active_count = self.model_config.num_gaussians
 
         self._initialize_gaussians_from_case(self.case_data)
 
@@ -196,6 +197,221 @@ class Trainer:
         opacity = self.model.gs.get_opacity.squeeze(-1).detach()
         return torch.topk(opacity, k=active_count, largest=True).indices
 
+    def _graph_sample_indices(self, active_indices: torch.Tensor) -> torch.Tensor:
+        if len(active_indices) <= self.config.graph_sample_size:
+            return active_indices
+        opacity = self.model.gs.get_opacity.squeeze(-1).detach()[active_indices]
+        sample_local = torch.topk(opacity, k=self.config.graph_sample_size, largest=True).indices
+        return active_indices[sample_local]
+
+    @staticmethod
+    def _mst_edges_from_distances(pairwise_dist_detached: torch.Tensor) -> list[tuple[int, int]]:
+        node_count = int(pairwise_dist_detached.shape[0])
+        if node_count <= 1:
+            return []
+        visited = torch.zeros(node_count, dtype=torch.bool)
+        visited[0] = True
+        edges: list[tuple[int, int]] = []
+        large_value = torch.tensor(float("inf"), dtype=pairwise_dist_detached.dtype)
+
+        for _ in range(node_count - 1):
+            masked = pairwise_dist_detached.clone()
+            masked[~visited] = large_value
+            masked[:, visited] = large_value
+            flat_index = int(torch.argmin(masked).item())
+            src = flat_index // node_count
+            dst = flat_index % node_count
+            if not torch.isfinite(masked[src, dst]):
+                break
+            edges.append((src, dst))
+            visited[dst] = True
+        return edges
+
+    def _graph_connectivity_penalty(self, active_indices: torch.Tensor) -> tuple[torch.Tensor, dict[str, object]]:
+        graph_indices = self._graph_sample_indices(active_indices)
+        xyz = self.model.gs.get_xyz[graph_indices]
+        if len(xyz) <= 1:
+            zero = torch.tensor(0.0, device=self.device)
+            return zero, {"graph_edge_mean": 0.0, "graph_edge_p90": 0.0, "graph_indices": graph_indices, "mst_edges": []}
+
+        pairwise_dist = torch.cdist(xyz, xyz)
+        detached = pairwise_dist.detach().cpu()
+        mst_edges = self._mst_edges_from_distances(detached)
+        if not mst_edges:
+            zero = torch.tensor(0.0, device=self.device)
+            return zero, {"graph_edge_mean": 0.0, "graph_edge_p90": 0.0, "graph_indices": graph_indices, "mst_edges": []}
+
+        edge_lengths = torch.stack([pairwise_dist[src, dst] for src, dst in mst_edges])
+        penalty = torch.relu(edge_lengths - self.config.graph_edge_target).pow(2).mean()
+        edge_lengths_detached = edge_lengths.detach().cpu()
+        return penalty, {
+            "graph_edge_mean": float(edge_lengths_detached.mean().item()),
+            "graph_edge_p90": float(torch.quantile(edge_lengths_detached, 0.9).item()),
+            "graph_indices": graph_indices,
+            "mst_edges": mst_edges,
+        }
+
+    @staticmethod
+    def _inactive_gaussian_indices(total_count: int, active_indices: torch.Tensor) -> torch.Tensor:
+        inactive_mask = torch.ones(total_count, dtype=torch.bool, device=active_indices.device)
+        inactive_mask[active_indices] = False
+        return torch.nonzero(inactive_mask, as_tuple=False).squeeze(-1)
+
+    def _densify_to_count(self, previous_active_indices: torch.Tensor, target_count: int) -> None:
+        inactive_indices = self._inactive_gaussian_indices(self.model_config.num_gaussians, previous_active_indices)
+        growth = min(target_count - len(previous_active_indices), len(inactive_indices))
+        if growth <= 0 or len(previous_active_indices) == 0:
+            return
+
+        with torch.no_grad():
+            active_xyz = self.model.gs.get_xyz[previous_active_indices]
+            active_scaling = self.model.gs.get_scaling[previous_active_indices]
+            active_opacity = self.model.gs.get_opacity.squeeze(-1)[previous_active_indices]
+            new_indices = inactive_indices[:growth]
+
+            graph_penalty, graph_stats = self._graph_connectivity_penalty(previous_active_indices)
+            del graph_penalty
+            graph_indices = graph_stats["graph_indices"]
+            mst_edges = graph_stats["mst_edges"]
+
+            edge_pairs: list[tuple[int, int]] = []
+            if mst_edges:
+                graph_xyz = self.model.gs.get_xyz[graph_indices]
+                edge_lengths = torch.tensor(
+                    [torch.norm(graph_xyz[src] - graph_xyz[dst]).item() for src, dst in mst_edges],
+                    device=self.device,
+                )
+                order = torch.argsort(edge_lengths, descending=True)
+                top_edges = max(1, min(len(order), self.config.densify_edge_knn))
+                selected = order[:top_edges].tolist()
+                edge_pairs = [(int(graph_indices[mst_edges[idx][0]].item()), int(graph_indices[mst_edges[idx][1]].item())) for idx in selected]
+
+            if not edge_pairs:
+                sample_weights = active_opacity / active_opacity.sum().clamp_min(1e-6)
+                source_local_indices = torch.multinomial(
+                    sample_weights,
+                    num_samples=growth,
+                    replacement=len(active_xyz) < growth,
+                )
+                edge_pairs = [
+                    (
+                        int(previous_active_indices[idx].item()),
+                        int(previous_active_indices[idx].item()),
+                    )
+                    for idx in source_local_indices.tolist()
+                ]
+
+            source_indices = []
+            neighbor_indices = []
+            for slot in range(growth):
+                src_idx, dst_idx = edge_pairs[slot % len(edge_pairs)]
+                source_indices.append(src_idx)
+                neighbor_indices.append(dst_idx)
+            source_indices_t = torch.tensor(source_indices, device=self.device, dtype=torch.long)
+            neighbor_indices_t = torch.tensor(neighbor_indices, device=self.device, dtype=torch.long)
+
+            source_xyz = self.model.gs.get_xyz[source_indices_t]
+            neighbor_xyz = self.model.gs.get_xyz[neighbor_indices_t]
+            source_scaling = self.model.gs.get_scaling[source_indices_t]
+            neighbor_scaling = self.model.gs.get_scaling[neighbor_indices_t]
+            source_opacity = self.model.gs.get_opacity.squeeze(-1)[source_indices_t]
+            neighbor_opacity = self.model.gs.get_opacity.squeeze(-1)[neighbor_indices_t]
+
+            tangents = F.normalize(neighbor_xyz - source_xyz + 1e-6, dim=-1)
+            blend = torch.rand((growth, 1), device=self.device, dtype=source_xyz.dtype) * 0.5 + 0.25
+            backbone_xyz = torch.lerp(source_xyz, neighbor_xyz, blend)
+            tangent_steps = (
+                torch.randn((growth, 1), device=self.device, dtype=source_xyz.dtype)
+                * source_scaling.mean(dim=-1, keepdim=True)
+                * self.config.densify_spacing_scale
+                * 0.15
+            )
+            tangent_offsets = tangents * tangent_steps
+
+            noise = torch.randn_like(source_xyz)
+            transverse_noise = noise - (noise * tangents).sum(dim=-1, keepdim=True) * tangents
+            transverse_offsets = transverse_noise * (
+                source_scaling.mean(dim=-1, keepdim=True) * self.config.densify_jitter_scale
+            )
+            new_xyz = backbone_xyz + tangent_offsets + transverse_offsets
+
+            interp_scale = torch.lerp(source_scaling, neighbor_scaling, blend)
+            interp_opacity = torch.lerp(source_opacity, neighbor_opacity, blend.squeeze(-1))
+            new_scale = torch.clamp(interp_scale * self.config.densify_scale_shrink, min=0.04)
+            new_opacity = torch.clamp(interp_opacity * self.config.densify_opacity_scale, min=1e-4, max=1.0 - 1e-4)
+
+            self.model.gs._xyz.data[new_indices] = new_xyz
+            self.model.gs._scaling.data[new_indices] = torch.log(new_scale)
+            self.model.gs._opacity.data[new_indices] = torch.logit(new_opacity).unsqueeze(-1)
+            self.model.gs._rotation.data[new_indices] = self.model.gs._rotation.data[source_indices_t]
+            self.model.gs._features_dc.data[new_indices] = self.model.gs._features_dc.data[source_indices_t]
+            self.model.gs._features_rest.data[new_indices] = self.model.gs._features_rest.data[source_indices_t]
+
+    def _maybe_densify(self, iteration: int) -> None:
+        target_count = self._active_gaussian_count(iteration)
+        if target_count <= self._last_active_count:
+            self._last_active_count = target_count
+            return
+
+        previous_active_indices = self._active_gaussian_indices(max(iteration - 1, 0))
+        self._densify_to_count(previous_active_indices, target_count)
+        self._last_active_count = target_count
+
+    def _volume_thickness_loss(self, active_indices: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
+        xyz = self.model.gs.get_xyz[active_indices]
+        scaling = self.model.gs.get_scaling[active_indices]
+        opacity = self.model.gs.get_opacity.squeeze(-1)[active_indices]
+        if len(xyz) == 0:
+            zero = torch.tensor(0.0, device=self.device)
+            return zero, {"volume_fill": 0.0, "volume_core_fill": 0.0}
+
+        if len(xyz) > self.config.volume_sample_size:
+            top_idx = torch.topk(opacity.detach(), k=self.config.volume_sample_size, largest=True).indices
+            xyz = xyz[top_idx]
+            scaling = scaling[top_idx]
+            opacity = opacity[top_idx]
+
+        radii = scaling.max(dim=-1).values
+        mins = torch.min(xyz - radii[:, None], dim=0).values
+        maxs = torch.max(xyz + radii[:, None], dim=0).values
+        spans = (maxs - mins).clamp_min(1.0)
+        axes = [
+            torch.linspace(mins[dim], maxs[dim], self.config.volume_grid_size, device=self.device, dtype=xyz.dtype)
+            for dim in range(3)
+        ]
+        grid_x, grid_y, grid_z = torch.meshgrid(*axes, indexing="ij")
+        flat_grid = torch.stack([grid_x.reshape(-1), grid_y.reshape(-1), grid_z.reshape(-1)], dim=-1)
+        density = torch.zeros(len(flat_grid), device=self.device, dtype=xyz.dtype)
+
+        for start in range(0, len(xyz), self.config.volume_chunk_size):
+            end = min(start + self.config.volume_chunk_size, len(xyz))
+            chunk_xyz = xyz[start:end]
+            chunk_scaling = scaling[start:end].clamp_min(1e-3)
+            chunk_opacity = opacity[start:end]
+            delta = flat_grid.unsqueeze(1) - chunk_xyz.unsqueeze(0)
+            normalized = delta / chunk_scaling.unsqueeze(0)
+            squared_distance = normalized.pow(2).sum(dim=-1)
+            chunk_density = torch.exp(-0.5 * squared_distance) * chunk_opacity.unsqueeze(0)
+            density = density + chunk_density.sum(dim=1)
+
+        occupancy = 1.0 - torch.exp(-density)
+        occupancy_grid = occupancy.view(
+            self.config.volume_grid_size,
+            self.config.volume_grid_size,
+            self.config.volume_grid_size,
+        )
+        occupancy_5d = occupancy_grid.unsqueeze(0).unsqueeze(0)
+        core_occupancy = -F.max_pool3d(-occupancy_5d, kernel_size=3, stride=1, padding=1)
+
+        volume_fill = occupancy_grid.mean()
+        core_fill = core_occupancy.mean()
+        loss = volume_fill + self.config.volume_core_weight * core_fill
+        return loss, {
+            "volume_fill": float(volume_fill.item()),
+            "volume_core_fill": float(core_fill.item()),
+            "volume_extent_mean": float((spans.mean()).item()),
+        }
+
     def _geometry_regularization(self, iteration: int, active_indices: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
         xyz = self.model.gs.get_xyz[active_indices]
         opacity = self.model.gs.get_opacity.squeeze(-1)[active_indices]
@@ -229,6 +445,8 @@ class Trainer:
             total_energy = eigenvalues.sum(dim=-1) + 1e-6
             line_structure = (transverse_energy / total_energy).mean()
 
+        graph_connectivity, graph_stats = self._graph_connectivity_penalty(active_indices)
+
         opacity_mean = opacity.mean()
         opacity_reg = (opacity_mean - self.config.opacity_mean_target).pow(2)
 
@@ -239,6 +457,7 @@ class Trainer:
             self.config.repulsion_weight * repulsion
             + self.config.std_floor_weight * std_floor
             + self.config.continuity_weight * continuity
+            + self.config.graph_connectivity_weight * graph_connectivity
             + self.config.line_structure_weight * line_structure
             + self.config.opacity_weight * opacity_reg
             + self.config.scale_weight * scale_reg
@@ -248,6 +467,9 @@ class Trainer:
             "repulsion": float(repulsion.item()),
             "std_floor": float(std_floor.item()),
             "continuity": float(continuity.item()),
+            "graph_connectivity": float(graph_connectivity.item()),
+            "graph_edge_mean": float(graph_stats["graph_edge_mean"]),
+            "graph_edge_p90": float(graph_stats["graph_edge_p90"]),
             "line_structure": float(line_structure.item()),
             "opacity_mean": float(opacity_mean.item()),
             "scale_mean": float(scaling_mean.item()),
@@ -327,6 +549,7 @@ class Trainer:
         loss_image = total_silhouette_loss / len(self.case_data["views"])
         loss_skeleton = total_skeleton_loss / len(self.case_data["views"])
         loss_reg, reg_stats = self._geometry_regularization(iteration, active_indices)
+        loss_volume, volume_stats = self._volume_thickness_loss(active_indices)
 
         if iteration >= self.config.physics_warmup_iterations:
             raw_coords = torch.rand(1024, 4, device=self.device, requires_grad=True)
@@ -341,6 +564,7 @@ class Trainer:
         total_loss = (
             self.config.silhouette_loss_weight * loss_image
             + self.config.skeleton_loss_weight * loss_skeleton
+            + self.config.volume_thickness_weight * loss_volume
             + self.config.physics_loss_weight * loss_physics
             + loss_reg
         )
@@ -355,6 +579,7 @@ class Trainer:
         self._save_debug_projection(iteration, rendered_views, target_views)
 
         reg_stats["skeleton_loss"] = float(loss_skeleton.item())
+        reg_stats.update(volume_stats)
         return total_loss.item(), loss_image.item(), loss_physics.item(), loss_reg.item(), reg_stats
 
     def train(self) -> None:
@@ -376,6 +601,8 @@ class Trainer:
         return int(checkpoint["iteration"])
 
     def train_from_iteration(self, start_iteration: int) -> None:
+        previous_iteration = max(start_iteration - 1, 0)
+        self._last_active_count = self._active_gaussian_count(previous_iteration)
         print(
             f"Starting training for {self.config.iterations} iterations on case "
             f"{self.case_index} ({self.case_id}) from iteration {start_iteration}..."
@@ -384,14 +611,15 @@ class Trainer:
         pbar = tqdm(range(start_iteration, self.config.iterations))
         for i in pbar:
             try:
+                self._maybe_densify(i)
                 loss, l_img, l_phys, l_reg, reg_stats = self.train_step(i)
                 self.failure_count = 0
                 if i % 10 == 0:
                     pbar.set_description(
                         "Loss: "
                         f"{loss:.4f} | Sil: {l_img:.4f} | Skel: {reg_stats['skeleton_loss']:.4f} "
-                        f"| Phys: {l_phys:.4f} | Reg: {l_reg:.4f} | Active: {int(reg_stats['active_gaussians'])} "
-                        f"| XYZstd: {reg_stats['xyz_std_mean']:.2f}"
+                        f"| Vol: {reg_stats['volume_core_fill']:.4f} | Phys: {l_phys:.4f} | Reg: {l_reg:.4f} "
+                        f"| Active: {int(reg_stats['active_gaussians'])} | XYZstd: {reg_stats['xyz_std_mean']:.2f}"
                     )
             except Exception as exc:
                 self.failure_count += 1
