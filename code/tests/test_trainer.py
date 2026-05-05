@@ -145,6 +145,7 @@ def test_graph_connectivity_penalty_prefers_connected_chain(tmp_path):
     trainer.config.graph_connectivity_weight = 1.0
     trainer.config.graph_sample_size = 8
     trainer.config.graph_edge_target = 2.0
+    trainer.config.graph_bridge_edges = 2
     active_indices = torch.arange(8)
 
     chain_points = torch.stack(
@@ -179,6 +180,7 @@ def test_graph_connectivity_penalty_prefers_connected_chain(tmp_path):
 
     assert chain_stats["graph_connectivity"] < fragmented_stats["graph_connectivity"]
     assert chain_stats["graph_edge_p90"] < fragmented_stats["graph_edge_p90"]
+    assert chain_stats["graph_bridge_mean"] < fragmented_stats["graph_bridge_mean"]
 
 
 def test_active_gaussian_schedule_changes_count(tmp_path):

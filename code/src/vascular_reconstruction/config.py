@@ -71,6 +71,7 @@ class TrainingConfig(BaseConfig):
     graph_connectivity_weight: float = 0.0
     graph_sample_size: int = 192
     graph_edge_target: float = 2.5
+    graph_bridge_edges: int = 8
     line_structure_weight: float = 0.05
     line_structure_knn: int = 8
     render_image_size: int = 128

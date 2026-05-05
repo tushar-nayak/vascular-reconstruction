@@ -242,11 +242,15 @@ class Trainer:
             return zero, {"graph_edge_mean": 0.0, "graph_edge_p90": 0.0, "graph_indices": graph_indices, "mst_edges": []}
 
         edge_lengths = torch.stack([pairwise_dist[src, dst] for src, dst in mst_edges])
-        penalty = torch.relu(edge_lengths - self.config.graph_edge_target).pow(2).mean()
+        bridge_count = min(self.config.graph_bridge_edges, len(edge_lengths))
+        bridge_lengths = torch.topk(edge_lengths, k=bridge_count, largest=True).values
+        normalized_gap = torch.relu(bridge_lengths - self.config.graph_edge_target) / max(self.config.graph_edge_target, 1e-3)
+        penalty = normalized_gap.pow(2).mean()
         edge_lengths_detached = edge_lengths.detach().cpu()
         return penalty, {
             "graph_edge_mean": float(edge_lengths_detached.mean().item()),
             "graph_edge_p90": float(torch.quantile(edge_lengths_detached, 0.9).item()),
+            "graph_bridge_mean": float(bridge_lengths.detach().cpu().mean().item()),
             "graph_indices": graph_indices,
             "mst_edges": mst_edges,
         }
@@ -470,6 +474,7 @@ class Trainer:
             "graph_connectivity": float(graph_connectivity.item()),
             "graph_edge_mean": float(graph_stats["graph_edge_mean"]),
             "graph_edge_p90": float(graph_stats["graph_edge_p90"]),
+            "graph_bridge_mean": float(graph_stats["graph_bridge_mean"]),
             "line_structure": float(line_structure.item()),
             "opacity_mean": float(opacity_mean.item()),
             "scale_mean": float(scaling_mean.item()),
