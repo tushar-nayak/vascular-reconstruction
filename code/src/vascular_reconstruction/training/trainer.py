@@ -50,6 +50,7 @@ class Trainer:
         self.case_data = self.dataset.get_case(self.case_index)
         self.case_id = str(self.case_data["case_id"])
         self._last_active_count = self.model_config.num_gaussians
+        self._support_views = self._build_support_views()
 
         self._initialize_gaussians_from_case(self.case_data)
 
@@ -168,6 +169,31 @@ class Trainer:
             + self.config.mass_match_weight * mass_match
         )
 
+    def _build_support_views(self) -> list[dict[str, torch.Tensor | Mapping[str, object]]]:
+        support_views: list[dict[str, torch.Tensor | Mapping[str, object]]] = []
+        skeleton_radius = max(int(self.config.point_skeleton_dilation_radius_px), 0)
+        skeleton_kernel = 2 * skeleton_radius + 1
+
+        for view in self.case_data["views"]:
+            vessel_mask = torch.from_numpy(np.asarray(view["vessel_mask"], dtype=np.float32)).to(self.device)
+            skeleton_mask_np = skeletonize(np.asarray(view["vessel_mask"], dtype=bool)).astype(np.float32)
+            skeleton_mask = torch.from_numpy(skeleton_mask_np).to(self.device)
+            if skeleton_radius > 0:
+                skeleton_mask = F.max_pool2d(
+                    skeleton_mask.unsqueeze(0).unsqueeze(0),
+                    kernel_size=skeleton_kernel,
+                    stride=1,
+                    padding=skeleton_radius,
+                ).squeeze(0).squeeze(0)
+            support_views.append(
+                {
+                    "view": view,
+                    "vessel_mask": vessel_mask,
+                    "skeleton_mask": skeleton_mask.clamp(0.0, 1.0),
+                }
+            )
+        return support_views
+
     def _skeleton_loss(
         self,
         rendered: torch.Tensor,
@@ -255,6 +281,121 @@ class Trainer:
             "mst_edges": mst_edges,
         }
 
+    def _sample_projected_map(
+        self,
+        points: torch.Tensor,
+        view: Mapping[str, object],
+        map_tensor: torch.Tensor,
+    ) -> torch.Tensor:
+        projected = self._project_world_points(points, view)
+        height, width = map_tensor.shape
+        x_norm = (projected[:, 0] / max(width - 1, 1)) * 2.0 - 1.0
+        y_norm = (projected[:, 1] / max(height - 1, 1)) * 2.0 - 1.0
+        grid = torch.stack([x_norm, y_norm], dim=-1).view(1, -1, 1, 2)
+        sampled = F.grid_sample(
+            map_tensor.unsqueeze(0).unsqueeze(0),
+            grid,
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=True,
+        )
+        return sampled.view(-1)
+
+    def _project_world_points(self, points: torch.Tensor, view: Mapping[str, object]) -> torch.Tensor:
+        lao, cran = view["angles"]
+        view_matrix = self.model.get_view_matrix(lao, cran, device=self.device)
+        projection_matrix = self._projection_matrix_from_view(view, self.device)
+        points_h = torch.cat([points, torch.ones_like(points[:, :1])], dim=-1)
+        xyz_cam = (points_h @ view_matrix.T)[:, :3]
+        x_dist = torch.clamp(xyz_cam[:, 0] + 600.0, min=1.0)
+        focal_x = projection_matrix[0, 0]
+        focal_y = projection_matrix[1, 1]
+        center_x = projection_matrix[0, 2]
+        center_y = projection_matrix[1, 2]
+        u_pix = (focal_x * xyz_cam[:, 1]) / x_dist + center_x
+        v_pix = (focal_y * (-xyz_cam[:, 2])) / x_dist + center_y
+        return torch.stack([u_pix, v_pix], dim=-1)
+
+    def _edge_multiview_support(self, start_point: torch.Tensor, end_point: torch.Tensor) -> float:
+        sample_count = max(self.config.densify_support_samples, 2)
+        alphas = torch.linspace(0.0, 1.0, steps=sample_count, device=self.device, dtype=start_point.dtype).unsqueeze(-1)
+        segment_points = torch.lerp(start_point.unsqueeze(0), end_point.unsqueeze(0), alphas)
+
+        total_score = 0.0
+        total_views = 0
+        radius = max(int(self.config.densify_support_radius_px), 0)
+        vessel_weight = float(self.config.densify_support_vessel_weight)
+        skeleton_weight = float(self.config.densify_support_skeleton_weight)
+
+        for support_view in self._support_views[: self.config.densify_support_views]:
+            view = support_view["view"]
+            vessel_mask = support_view["vessel_mask"]
+            skeleton_mask = support_view["skeleton_mask"]
+
+            projected = self._project_world_points(segment_points, view)
+            width = vessel_mask.shape[1]
+            height = vessel_mask.shape[0]
+            sample_score = 0.0
+
+            for coord in projected:
+                x = int(round(float(coord[0].item())))
+                y = int(round(float(coord[1].item())))
+                x0 = max(0, x - radius)
+                x1 = min(width, x + radius + 1)
+                y0 = max(0, y - radius)
+                y1 = min(height, y + radius + 1)
+                if x0 >= x1 or y0 >= y1:
+                    continue
+                vessel_patch = vessel_mask[y0:y1, x0:x1]
+                skeleton_patch = skeleton_mask[y0:y1, x0:x1]
+                vessel_hit = 1.0 if torch.any(vessel_patch > 0.5) else 0.0
+                skeleton_hit = 1.0 if torch.any(skeleton_patch > 0.5) else 0.0
+                sample_score += vessel_weight * vessel_hit + skeleton_weight * skeleton_hit
+
+            total_score += sample_score / sample_count
+            total_views += 1
+
+        if total_views == 0:
+            return 0.0
+        return float(total_score / total_views)
+
+    def _point_multiview_support_loss(self, active_indices: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
+        if len(active_indices) == 0 or self.config.point_support_weight <= 0.0:
+            zero = torch.tensor(0.0, device=self.device)
+            return zero, {"point_vessel_support": 0.0, "point_skeleton_support": 0.0}
+
+        sample_size = min(len(active_indices), self.config.point_support_sample_size)
+        opacity = self.model.gs.get_opacity.squeeze(-1)[active_indices]
+        sample_local = torch.topk(opacity.detach(), k=sample_size, largest=True).indices
+        sampled_indices = active_indices[sample_local]
+        sampled_xyz = self.model.gs.get_xyz[sampled_indices]
+
+        vessel_supports: list[torch.Tensor] = []
+        skeleton_supports: list[torch.Tensor] = []
+        for support_view in self._support_views[: self.config.point_support_views]:
+            view = support_view["view"]
+            vessel_mask = support_view["vessel_mask"]
+            skeleton_mask = support_view["skeleton_mask"]
+            vessel_supports.append(self._sample_projected_map(sampled_xyz, view, vessel_mask))
+            skeleton_supports.append(self._sample_projected_map(sampled_xyz, view, skeleton_mask))
+
+        if not vessel_supports:
+            zero = torch.tensor(0.0, device=self.device)
+            return zero, {"point_vessel_support": 0.0, "point_skeleton_support": 0.0}
+
+        vessel_support = torch.stack(vessel_supports, dim=0).mean(dim=0)
+        skeleton_support = torch.stack(skeleton_supports, dim=0).mean(dim=0)
+        low_vessel_support = torch.relu(self.config.point_vessel_min_ratio - vessel_support).pow(2).mean()
+        low_skeleton_support = (1.0 - skeleton_support).mean()
+        loss = (
+            self.config.point_support_weight * low_vessel_support
+            + self.config.point_skeleton_weight * low_skeleton_support
+        )
+        return loss, {
+            "point_vessel_support": float(vessel_support.mean().item()),
+            "point_skeleton_support": float(skeleton_support.mean().item()),
+        }
+
     @staticmethod
     def _inactive_gaussian_indices(total_count: int, active_indices: torch.Tensor) -> torch.Tensor:
         inactive_mask = torch.ones(total_count, dtype=torch.bool, device=active_indices.device)
@@ -287,8 +428,21 @@ class Trainer:
                 )
                 order = torch.argsort(edge_lengths, descending=True)
                 top_edges = max(1, min(len(order), self.config.densify_edge_knn))
-                selected = order[:top_edges].tolist()
-                edge_pairs = [(int(graph_indices[mst_edges[idx][0]].item()), int(graph_indices[mst_edges[idx][1]].item())) for idx in selected]
+                scored_edges: list[tuple[float, tuple[int, int]]] = []
+                for idx in order[:top_edges].tolist():
+                    src_idx = int(graph_indices[mst_edges[idx][0]].item())
+                    dst_idx = int(graph_indices[mst_edges[idx][1]].item())
+                    support_score = self._edge_multiview_support(
+                        self.model.gs.get_xyz[src_idx],
+                        self.model.gs.get_xyz[dst_idx],
+                    )
+                    scored_edges.append((support_score, (src_idx, dst_idx)))
+
+                supported_edges = [pair for score, pair in scored_edges if score >= self.config.densify_min_support_ratio]
+                if supported_edges:
+                    edge_pairs = supported_edges
+                else:
+                    edge_pairs = [pair for _, pair in sorted(scored_edges, key=lambda item: item[0], reverse=True)]
 
             if not edge_pairs:
                 sample_weights = active_opacity / active_opacity.sum().clamp_min(1e-6)
@@ -450,6 +604,7 @@ class Trainer:
             line_structure = (transverse_energy / total_energy).mean()
 
         graph_connectivity, graph_stats = self._graph_connectivity_penalty(active_indices)
+        point_support, point_support_stats = self._point_multiview_support_loss(active_indices)
 
         opacity_mean = opacity.mean()
         opacity_reg = (opacity_mean - self.config.opacity_mean_target).pow(2)
@@ -463,6 +618,7 @@ class Trainer:
             + self.config.continuity_weight * continuity
             + self.config.graph_connectivity_weight * graph_connectivity
             + self.config.line_structure_weight * line_structure
+            + point_support
             + self.config.opacity_weight * opacity_reg
             + self.config.scale_weight * scale_reg
         )
@@ -476,6 +632,8 @@ class Trainer:
             "graph_edge_p90": float(graph_stats["graph_edge_p90"]),
             "graph_bridge_mean": float(graph_stats["graph_bridge_mean"]),
             "line_structure": float(line_structure.item()),
+            "point_vessel_support": float(point_support_stats["point_vessel_support"]),
+            "point_skeleton_support": float(point_support_stats["point_skeleton_support"]),
             "opacity_mean": float(opacity_mean.item()),
             "scale_mean": float(scaling_mean.item()),
             "xyz_std_mean": float(axis_std.mean().item()),

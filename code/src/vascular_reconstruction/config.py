@@ -74,6 +74,12 @@ class TrainingConfig(BaseConfig):
     graph_bridge_edges: int = 8
     line_structure_weight: float = 0.05
     line_structure_knn: int = 8
+    point_support_weight: float = 0.0
+    point_skeleton_weight: float = 0.0
+    point_support_sample_size: int = 1024
+    point_support_views: int = 6
+    point_vessel_min_ratio: float = 0.8
+    point_skeleton_dilation_radius_px: int = 3
     render_image_size: int = 128
     gaussian_chunk_size: int = 512
     render_min_sigma: float = 0.12
@@ -93,6 +99,12 @@ class TrainingConfig(BaseConfig):
     densify_spacing_scale: float = 0.75
     densify_jitter_scale: float = 0.2
     densify_edge_knn: int = 4
+    densify_support_views: int = 6
+    densify_support_samples: int = 5
+    densify_support_radius_px: int = 3
+    densify_min_support_ratio: float = 0.35
+    densify_support_vessel_weight: float = 0.35
+    densify_support_skeleton_weight: float = 0.65
     init_from_case_index: int = 0
     init_depth_mm: float = 8.0
     init_jitter_mm: float = 1.5

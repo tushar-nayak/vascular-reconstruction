@@ -304,6 +304,57 @@ def test_densify_targets_gap_edges(tmp_path):
     assert np.max(np.abs(new_x)) < 6.0
 
 
+def test_edge_multiview_support_prefers_supported_bridge(tmp_path):
+    trainer = _build_trainer(tmp_path, num_gaussians=8)
+    trainer.config.densify_support_views = 1
+    trainer.config.densify_support_samples = 5
+    trainer.config.densify_support_radius_px = 0
+
+    supported_start = torch.tensor([-10.0, 0.0, 0.0], dtype=torch.float32)
+    supported_end = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float32)
+    unsupported_start = torch.tensor([-10.0, 400.0, 0.0], dtype=torch.float32)
+    unsupported_end = torch.tensor([10.0, 400.0, 0.0], dtype=torch.float32)
+
+    supported_score = trainer._edge_multiview_support(supported_start, supported_end)
+    unsupported_score = trainer._edge_multiview_support(unsupported_start, unsupported_end)
+
+    assert supported_score > unsupported_score
+
+
+def test_point_multiview_support_prefers_centerline_points(tmp_path):
+    trainer = _build_trainer(tmp_path, num_gaussians=8)
+    trainer.config.point_support_weight = 1.0
+    trainer.config.point_skeleton_weight = 1.0
+    trainer.config.point_support_views = 1
+    trainer.config.point_support_sample_size = 8
+    trainer.config.point_vessel_min_ratio = 0.8
+
+    centered_points = torch.stack(
+        [
+            torch.linspace(-8.0, 8.0, steps=8),
+            torch.zeros(8),
+            torch.zeros(8),
+        ],
+        dim=-1,
+    )
+    shifted_points = centered_points.clone()
+    shifted_points[:, 1] = 250.0
+    active_indices = torch.arange(8)
+
+    with torch.no_grad():
+        trainer.model.gs._xyz.copy_(centered_points)
+        trainer.model.gs._opacity.fill_(2.0)
+    centered_loss, centered_stats = trainer._point_multiview_support_loss(active_indices)
+
+    with torch.no_grad():
+        trainer.model.gs._xyz.copy_(shifted_points)
+    shifted_loss, shifted_stats = trainer._point_multiview_support_loss(active_indices)
+
+    assert centered_loss.item() < shifted_loss.item()
+    assert centered_stats["point_vessel_support"] > shifted_stats["point_vessel_support"]
+    assert centered_stats["point_skeleton_support"] > shifted_stats["point_skeleton_support"]
+
+
 def test_silhouette_renderer_returns_soft_mask(tmp_path):
     trainer = _build_trainer(tmp_path, num_gaussians=8)
     view = trainer.case_data["views"][0]
