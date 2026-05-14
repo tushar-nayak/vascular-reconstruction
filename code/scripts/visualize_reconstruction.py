@@ -262,12 +262,40 @@ def _save_metrics(
         json.dump(metrics, f, indent=2)
 
 
-def visualize_checkpoint(checkpoint_path: Path, output_dir: Path, mesh_path: Path | None = None) -> None:
+def visualize_checkpoint(
+    checkpoint_path: Path,
+    output_dir: Path,
+    mesh_path: Path | None = None,
+    save_figure: bool = True,
+) -> dict[str, float | int | str | list[float]]:
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint, model = _load_model_from_checkpoint(checkpoint_path)
     xyz = model.gs.get_xyz.detach().cpu().numpy()
     mesh_vertices = _prepare_mesh_vertices(mesh_path)
     diagnostics = _build_graph_diagnostics(xyz)
+    center = xyz.mean(axis=0)
+    std = xyz.std(axis=0)
+    metrics = {
+        "checkpoint_path": str(checkpoint_path),
+        "iteration": int(checkpoint["iteration"]),
+        "point_count": int(len(xyz)),
+        "center": [float(value) for value in center.tolist()],
+        "std": [float(value) for value in std.tolist()],
+        "component_count": int(diagnostics["component_count"]),
+        "largest_component_fraction": float(diagnostics["largest_component_fraction"]),
+        "neighbor_distance_mean": float(diagnostics["neighbor_distance_mean"]),
+        "neighbor_distance_p95": float(diagnostics["neighbor_distance_p95"]),
+        "mst_mean": float(diagnostics["mst_mean"]),
+        "mst_p95": float(diagnostics["mst_p95"]),
+        "line_score_mean": float(diagnostics["line_score_mean"]),
+    }
+
+    metrics_path = output_dir / f"reconstruction_comparison_iter_{checkpoint['iteration']}.json"
+    _save_metrics(metrics_path, checkpoint_path, checkpoint, xyz, diagnostics)
+    print(f"Metrics saved to {metrics_path}")
+
+    if not save_figure:
+        return metrics
 
     fig, axes = plt.subplots(3, 3, figsize=(16, 14), constrained_layout=True)
     fig.suptitle(f"Checkpoint {checkpoint['iteration']} Geometry Diagnostics", fontsize=18)
@@ -292,12 +320,10 @@ def visualize_checkpoint(checkpoint_path: Path, output_dir: Path, mesh_path: Pat
     axes[2, 2].axis("off")
 
     output_path = output_dir / f"reconstruction_comparison_iter_{checkpoint['iteration']}.png"
-    metrics_path = output_dir / f"reconstruction_comparison_iter_{checkpoint['iteration']}.json"
     fig.savefig(output_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
-    _save_metrics(metrics_path, checkpoint_path, checkpoint, xyz, diagnostics)
     print(f"Visualization saved to {output_path}")
-    print(f"Metrics saved to {metrics_path}")
+    return metrics
 
 
 def main() -> None:
