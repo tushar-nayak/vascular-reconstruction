@@ -223,7 +223,7 @@ def visualize_checkpoint(
     }
 
     metrics_path = output_dir / f"reconstruction_comparison_iter_{checkpoint['iteration']}.json"
-    _save_metrics(metrics_path, checkpoint_path, checkpoint, xyz, diagnostics)
+    _save_metrics(metrics_path, metrics)
     print(f"Metrics saved to {metrics_path}")
 
     if not save_figure:
