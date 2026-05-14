@@ -52,6 +52,7 @@ def _collect_metrics(checkpoint_dirs: list[Path], output_root: Path, mesh_root: 
 
 def _write_summary(results: list[dict[str, object]], output_root: Path) -> Path:
     ranked = sorted(results, key=_rank_key)
+    best_passing = next((result for result in ranked if bool(result.get("gate_pass", True))), None)
     summary = {
         "ranking_rule": [
             "gate_pass desc",
@@ -61,7 +62,8 @@ def _write_summary(results: list[dict[str, object]], output_root: Path) -> Path:
             "occupancy_fill_ratio asc",
             "mst_p95 asc",
         ],
-        "best_baseline": ranked[0] if ranked else None,
+        "best_result": ranked[0] if ranked else None,
+        "best_passing_result": best_passing,
         "results": ranked,
     }
     summary_path = output_root / "scoreboard.json"
@@ -87,7 +89,7 @@ def main() -> None:
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path("metrics"),
+        default=Path("code/outputs/metrics"),
         help="Directory for per-checkpoint JSON metrics and the overall scoreboard.",
     )
     parser.add_argument(
@@ -109,7 +111,7 @@ def main() -> None:
     if results:
         best = sorted(results, key=_rank_key)[0]
         print(
-            "Best baseline: "
+            "Best result: "
             f"{best['experiment']} @ iter {best['iteration']} "
             f"(gate_pass={bool(best.get('gate_pass', True))}, "
             f"voxel_largest_component_fraction={best['voxel_largest_component_fraction']:.3f}, "
