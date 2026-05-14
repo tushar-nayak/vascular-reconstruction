@@ -106,14 +106,23 @@ def _export_mesh(
     verts, faces, _normals, _values = measure.marching_cubes(occupancy.astype(np.float32), level=0.5)
     spacing = (maxs - mins) / np.maximum(np.array(occupancy.shape) - 1, 1)
     verts_world = mins + verts.astype(np.float32) * spacing
-
-    try:
-        import trimesh
-    except ModuleNotFoundError as exc:
-        raise ModuleNotFoundError("trimesh is required to export reconstructed meshes.") from exc
-
-    mesh = trimesh.Trimesh(vertices=verts_world, faces=faces, process=False)
-    mesh.export(output_path)
+    with output_path.open("w", encoding="utf-8") as f:
+        f.write("solid reconstruction\n")
+        for face in faces:
+            triangle = verts_world[face]
+            normal = np.cross(triangle[1] - triangle[0], triangle[2] - triangle[0])
+            norm = np.linalg.norm(normal)
+            if norm > 0:
+                normal = normal / norm
+            else:
+                normal = np.zeros(3, dtype=np.float32)
+            f.write(f"  facet normal {normal[0]:.6e} {normal[1]:.6e} {normal[2]:.6e}\n")
+            f.write("    outer loop\n")
+            for vertex in triangle:
+                f.write(f"      vertex {vertex[0]:.6e} {vertex[1]:.6e} {vertex[2]:.6e}\n")
+            f.write("    endloop\n")
+            f.write("  endfacet\n")
+        f.write("endsolid reconstruction\n")
 
 
 def _save_debug_image(output_path: Path, occupancy: np.ndarray, centerline_points: np.ndarray, mins: np.ndarray, maxs: np.ndarray) -> None:
