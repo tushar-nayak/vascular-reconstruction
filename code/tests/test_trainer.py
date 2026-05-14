@@ -416,3 +416,91 @@ def test_train_step_writes_debug_projection(tmp_path):
     assert "volume_core_fill" in stats
     debug_files = sorted((tmp_path / "debug").glob("*.png"))
     assert len(debug_files) == 1
+
+
+def test_evaluate_current_reconstruction_applies_gate_and_score(tmp_path, monkeypatch):
+    trainer = _build_trainer(tmp_path, num_gaussians=8)
+    trainer.config.gate_min_graph_largest_component_fraction = 0.45
+    trainer.config.gate_max_graph_component_count = 300
+    trainer.config.gate_min_voxel_largest_component_fraction = 0.45
+    trainer.config.gate_max_voxel_component_count = 900
+    trainer.config.gate_max_occupancy_fill_ratio = 0.03
+    trainer.config.gate_max_mesh_vertex_chamfer_p95 = 180.0
+
+    def fake_evaluate_reconstruction(*_args, **_kwargs):
+        return {
+            "largest_component_fraction": 0.52,
+            "component_count": 180,
+            "voxel_largest_component_fraction": 0.61,
+            "voxel_component_count": 420,
+            "occupancy_fill_ratio": 0.02,
+            "mesh_vertex_chamfer_p95": 150.0,
+            "mst_p95": 2.75,
+        }
+
+    monkeypatch.setattr(
+        "vascular_reconstruction.training.trainer.evaluate_reconstruction",
+        fake_evaluate_reconstruction,
+    )
+
+    metrics = trainer.evaluate_current_reconstruction(iteration=75)
+
+    assert metrics["iteration"] == 75
+    assert metrics["gate_pass"] is True
+    assert metrics["score"] == [-0.61, 420.0, 150.0, 0.02, 2.75]
+
+
+def test_maybe_run_eval_only_saves_improved_gate_checkpoint(tmp_path, monkeypatch):
+    trainer = _build_trainer(tmp_path, num_gaussians=8)
+    trainer.config.eval_interval = 5
+
+    eval_results = {
+        5: {
+            "iteration": 5,
+            "gate_pass": True,
+            "score": [-0.55, 600.0, 170.0, 0.02, 3.0],
+            "voxel_largest_component_fraction": 0.55,
+            "voxel_component_count": 600,
+            "occupancy_fill_ratio": 0.02,
+            "mesh_vertex_chamfer_p95": 170.0,
+        },
+        10: {
+            "iteration": 10,
+            "gate_pass": True,
+            "score": [-0.50, 650.0, 175.0, 0.02, 3.1],
+            "voxel_largest_component_fraction": 0.50,
+            "voxel_component_count": 650,
+            "occupancy_fill_ratio": 0.02,
+            "mesh_vertex_chamfer_p95": 175.0,
+        },
+        15: {
+            "iteration": 15,
+            "gate_pass": True,
+            "score": [-0.60, 500.0, 165.0, 0.018, 2.8],
+            "voxel_largest_component_fraction": 0.60,
+            "voxel_component_count": 500,
+            "occupancy_fill_ratio": 0.018,
+            "mesh_vertex_chamfer_p95": 165.0,
+        },
+    }
+    saved_calls: list[tuple[int, str | None, dict[str, object] | None]] = []
+    written_metrics: list[int] = []
+
+    monkeypatch.setattr(trainer, "evaluate_current_reconstruction", lambda iteration: eval_results[iteration])
+    monkeypatch.setattr(trainer, "_write_eval_metrics", lambda metrics: written_metrics.append(int(metrics["iteration"])))
+    monkeypatch.setattr(
+        trainer,
+        "save_checkpoint",
+        lambda iteration, filename=None, eval_metrics=None: saved_calls.append((iteration, filename, eval_metrics)),
+    )
+
+    trainer._maybe_run_eval(5)
+    trainer._maybe_run_eval(10)
+    trainer._maybe_run_eval(15)
+
+    assert written_metrics == [5, 10, 15]
+    assert [call[:2] for call in saved_calls] == [
+        (5, "best_gate_checkpoint.pt"),
+        (15, "best_gate_checkpoint.pt"),
+    ]
+    assert trainer.best_eval_score == (-0.60, 500.0, 165.0, 0.018, 2.8)
