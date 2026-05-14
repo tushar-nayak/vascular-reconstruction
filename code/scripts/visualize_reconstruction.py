@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -234,6 +235,33 @@ def _plot_summary(ax, checkpoint: dict[str, object], xyz: np.ndarray, diagnostic
     ax.text(0.0, 1.0, "\n".join(lines), va="top", ha="left", family="monospace", fontsize=10)
 
 
+def _save_metrics(
+    output_path: Path,
+    checkpoint_path: Path,
+    checkpoint: dict[str, object],
+    xyz: np.ndarray,
+    diagnostics: dict[str, object],
+) -> None:
+    center = xyz.mean(axis=0)
+    std = xyz.std(axis=0)
+    metrics = {
+        "checkpoint_path": str(checkpoint_path),
+        "iteration": int(checkpoint["iteration"]),
+        "point_count": int(len(xyz)),
+        "center": [float(value) for value in center.tolist()],
+        "std": [float(value) for value in std.tolist()],
+        "component_count": int(diagnostics["component_count"]),
+        "largest_component_fraction": float(diagnostics["largest_component_fraction"]),
+        "neighbor_distance_mean": float(diagnostics["neighbor_distance_mean"]),
+        "neighbor_distance_p95": float(diagnostics["neighbor_distance_p95"]),
+        "mst_mean": float(diagnostics["mst_mean"]),
+        "mst_p95": float(diagnostics["mst_p95"]),
+        "line_score_mean": float(diagnostics["line_score_mean"]),
+    }
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2)
+
+
 def visualize_checkpoint(checkpoint_path: Path, output_dir: Path, mesh_path: Path | None = None) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint, model = _load_model_from_checkpoint(checkpoint_path)
@@ -264,9 +292,12 @@ def visualize_checkpoint(checkpoint_path: Path, output_dir: Path, mesh_path: Pat
     axes[2, 2].axis("off")
 
     output_path = output_dir / f"reconstruction_comparison_iter_{checkpoint['iteration']}.png"
+    metrics_path = output_dir / f"reconstruction_comparison_iter_{checkpoint['iteration']}.json"
     fig.savefig(output_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
+    _save_metrics(metrics_path, checkpoint_path, checkpoint, xyz, diagnostics)
     print(f"Visualization saved to {output_path}")
+    print(f"Metrics saved to {metrics_path}")
 
 
 def main() -> None:
