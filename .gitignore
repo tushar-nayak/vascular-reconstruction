@@ -32,4 +32,7 @@ visualization_current/
 visualization_refined/
 visualization_comparison/
 visualization_final/
+visualization_*/
+reconstruction_*/
+centerline_*/
 metrics/

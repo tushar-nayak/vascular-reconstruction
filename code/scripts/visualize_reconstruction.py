@@ -35,6 +35,11 @@ PROJECTIONS = (
 )
 
 
+def _default_output_dir(checkpoint_path: Path) -> Path:
+    run_name = checkpoint_path.parent.name or checkpoint_path.stem
+    return ROOT / "outputs" / "visualization" / run_name
+
+
 def _load_model_from_checkpoint(checkpoint_path: Path) -> tuple[dict[str, object], PINN_GS]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     state_dict = checkpoint["model_state_dict"]
@@ -261,9 +266,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Visualize reconstruction checkpoints.")
     parser.add_argument("--checkpoint", type=Path, required=True, help="Path to .pt checkpoint.")
     parser.add_argument("--mesh", type=Path, help="Path to ground truth STL mesh.")
-    parser.add_argument("--output-dir", type=Path, default=Path("visualization"), help="Output directory.")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Output directory. Defaults to code/outputs/visualization/<checkpoint-dir>/.",
+    )
     args = parser.parse_args()
-    visualize_checkpoint(args.checkpoint, args.output_dir, args.mesh)
+    output_dir = args.output_dir or _default_output_dir(args.checkpoint)
+    visualize_checkpoint(args.checkpoint, output_dir, args.mesh)
 
 
 if __name__ == "__main__":

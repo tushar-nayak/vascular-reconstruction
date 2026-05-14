@@ -209,6 +209,8 @@ python code/scripts/extract_centerline.py \
   --checkpoint checkpoints/checkpoint_10000.pt
 ```
 
+If `--output-dir` is omitted, both scripts now write under `code/outputs/` using a subdirectory derived from the checkpoint folder name.
+
 ## Current status
 
 This is the honest version:

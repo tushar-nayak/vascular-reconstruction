@@ -23,6 +23,11 @@ from vascular_reconstruction.config import ModelConfig
 from vascular_reconstruction.models.pinn_gs import PINN_GS
 
 
+def _default_output_dir(checkpoint_path: Path) -> Path:
+    run_name = checkpoint_path.parent.name or checkpoint_path.stem
+    return ROOT / "outputs" / "centerline" / run_name
+
+
 def _load_model(checkpoint_path: Path) -> tuple[dict[str, object], PINN_GS]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     model_config = ModelConfig.from_dict(checkpoint["model_config"])
@@ -163,13 +168,17 @@ def _save_debug_image(output_path: Path, occupancy: np.ndarray, centerline_point
 def main() -> None:
     parser = argparse.ArgumentParser(description="Extract centerline candidates from a reconstruction checkpoint.")
     parser.add_argument("--checkpoint", type=Path, required=True, help="Path to .pt checkpoint.")
-    parser.add_argument("--output-dir", type=Path, default=Path("centerline_extraction"), help="Output directory.")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Output directory. Defaults to code/outputs/centerline/<checkpoint-dir>/.",
+    )
     parser.add_argument("--grid-size", type=int, default=96, help="Voxel grid size per axis.")
     parser.add_argument("--density-quantile", type=float, default=0.9, help="Density quantile for occupancy threshold.")
     parser.add_argument("--export-mesh", action="store_true", help="Export an occupancy-derived mesh.")
     args = parser.parse_args()
 
-    output_dir = args.output_dir
+    output_dir = args.output_dir or _default_output_dir(args.checkpoint)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     checkpoint, model = _load_model(args.checkpoint)
