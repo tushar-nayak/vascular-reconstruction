@@ -18,7 +18,12 @@ from tqdm import tqdm
 
 from vascular_reconstruction.config import ModelConfig, TrainingConfig
 from vascular_reconstruction.data.dataset import ProjectionDataset
-from vascular_reconstruction.evaluation.reconstruction_metrics import ReconstructionGeometry, evaluate_reconstruction
+from vascular_reconstruction.evaluation.reconstruction_metrics import (
+    ReconstructionGeometry,
+    active_gaussian_count_from_schedule,
+    evaluate_reconstruction,
+    select_active_geometry,
+)
 from vascular_reconstruction.models.pinn_gs import PINN_GS
 from vascular_reconstruction.rendering import downsample_mask, render_gaussian_silhouette
 from vascular_reconstruction.simulation.equations import navier_stokes_loss
@@ -214,14 +219,11 @@ class Trainer:
         )
 
     def _active_gaussian_count(self, iteration: int) -> int:
-        if not self.config.active_gaussian_schedule:
-            return self.model_config.num_gaussians
-
-        active_count = self.model_config.num_gaussians
-        for start_iteration, count in self.config.active_gaussian_schedule:
-            if iteration >= int(start_iteration):
-                active_count = int(count)
-        return min(max(active_count, 1), self.model_config.num_gaussians)
+        return active_gaussian_count_from_schedule(
+            total_count=self.model_config.num_gaussians,
+            active_gaussian_schedule=self.config.active_gaussian_schedule,
+            iteration=iteration,
+        )
 
     def _active_gaussian_indices(self, iteration: int) -> torch.Tensor:
         active_count = self._active_gaussian_count(iteration)
@@ -892,14 +894,17 @@ class Trainer:
         return total_loss.item(), loss_image.item(), loss_physics.item(), loss_reg.item(), reg_stats
 
     def evaluate_current_reconstruction(self, iteration: int) -> dict[str, float | int | list[float] | bool]:
-        active_indices = self._active_gaussian_indices(iteration)
         geometry = ReconstructionGeometry(
-            xyz=self.model.gs.get_xyz[active_indices].detach().cpu().numpy(),
-            scales=self.model.gs.get_scaling[active_indices].detach().cpu().numpy(),
-            opacities=self.model.gs.get_opacity[active_indices].detach().cpu().numpy().squeeze(-1),
+            xyz=self.model.gs.get_xyz.detach().cpu().numpy(),
+            scales=self.model.gs.get_scaling.detach().cpu().numpy(),
+            opacities=self.model.gs.get_opacity.detach().cpu().numpy().squeeze(-1),
+        )
+        active_geometry = select_active_geometry(
+            geometry,
+            active_count=self._active_gaussian_count(iteration),
         )
         metrics = evaluate_reconstruction(
-            geometry,
+            active_geometry,
             gt_mesh_path=self.gt_mesh_path,
             voxel_grid_size=max(self.config.volume_grid_size * 4, 64),
             density_quantile=self.config.voxel_density_quantile,
@@ -927,7 +932,7 @@ class Trainer:
                 "iteration": iteration,
                 "gate_pass": bool(gate_pass),
                 "score": list(score),
-                "active_gaussians": int(len(active_indices)),
+                "active_gaussians": int(len(active_geometry.xyz)),
             }
         )
         return metrics

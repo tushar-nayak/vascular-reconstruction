@@ -21,6 +21,37 @@ class ReconstructionGeometry:
     opacities: np.ndarray
 
 
+def active_gaussian_count_from_schedule(
+    total_count: int,
+    active_gaussian_schedule: list[list[int]] | None,
+    iteration: int,
+) -> int:
+    if not active_gaussian_schedule:
+        return total_count
+
+    active_count = total_count
+    for start_iteration, count in active_gaussian_schedule:
+        if iteration >= int(start_iteration):
+            active_count = int(count)
+    return min(max(active_count, 1), total_count)
+
+
+def select_active_geometry(
+    geometry: ReconstructionGeometry,
+    active_count: int,
+) -> ReconstructionGeometry:
+    if len(geometry.xyz) <= active_count:
+        return geometry
+
+    active_count = min(max(int(active_count), 1), len(geometry.xyz))
+    active_indices = np.argsort(geometry.opacities)[-active_count:]
+    return ReconstructionGeometry(
+        xyz=geometry.xyz[active_indices],
+        scales=geometry.scales[active_indices],
+        opacities=geometry.opacities[active_indices],
+    )
+
+
 def sample_points(points: np.ndarray, max_points: int, seed: int) -> np.ndarray:
     if len(points) <= max_points:
         return points

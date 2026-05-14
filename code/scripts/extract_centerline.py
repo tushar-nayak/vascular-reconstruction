@@ -20,6 +20,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from vascular_reconstruction.config import ModelConfig
+from vascular_reconstruction.evaluation.reconstruction_metrics import (
+    ReconstructionGeometry,
+    active_gaussian_count_from_schedule,
+    select_active_geometry,
+)
 from vascular_reconstruction.models.pinn_gs import PINN_GS
 
 
@@ -182,11 +187,25 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     checkpoint, model = _load_model(args.checkpoint)
-    xyz = model.gs.get_xyz.detach().cpu().numpy()
-    scales = model.gs.get_scaling.detach().cpu().numpy()
-    opacities = model.gs.get_opacity.detach().cpu().numpy().squeeze(-1)
+    geometry = ReconstructionGeometry(
+        xyz=model.gs.get_xyz.detach().cpu().numpy(),
+        scales=model.gs.get_scaling.detach().cpu().numpy(),
+        opacities=model.gs.get_opacity.detach().cpu().numpy().squeeze(-1),
+    )
+    training_config = checkpoint.get("training_config") or {}
+    active_count = active_gaussian_count_from_schedule(
+        total_count=len(geometry.xyz),
+        active_gaussian_schedule=training_config.get("active_gaussian_schedule"),
+        iteration=int(checkpoint["iteration"]),
+    )
+    active_geometry = select_active_geometry(geometry, active_count=active_count)
 
-    density, mins, maxs = _voxelize(xyz, scales, opacities, grid_size=args.grid_size)
+    density, mins, maxs = _voxelize(
+        active_geometry.xyz,
+        active_geometry.scales,
+        active_geometry.opacities,
+        grid_size=args.grid_size,
+    )
     occupancy, centerline_points = _extract_centerline_points(
         density,
         mins,

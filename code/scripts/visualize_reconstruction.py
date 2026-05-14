@@ -22,8 +22,10 @@ sys.path.insert(0, str(ROOT / "src"))
 from vascular_reconstruction.config import ModelConfig
 from vascular_reconstruction.evaluation.reconstruction_metrics import (
     ReconstructionGeometry,
+    active_gaussian_count_from_schedule,
     build_graph_diagnostics,
     evaluate_reconstruction,
+    select_active_geometry,
     sample_points,
 )
 from vascular_reconstruction.models.pinn_gs import PINN_GS
@@ -213,16 +215,28 @@ def visualize_checkpoint(
 ) -> dict[str, float | int | str | list[float]]:
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint, model = _load_model_from_checkpoint(checkpoint_path)
-    xyz = model.gs.get_xyz.detach().cpu().numpy()
-    scales = model.gs.get_scaling.detach().cpu().numpy()
-    opacities = model.gs.get_opacity.detach().cpu().numpy().squeeze(-1)
+    geometry = ReconstructionGeometry(
+        xyz=model.gs.get_xyz.detach().cpu().numpy(),
+        scales=model.gs.get_scaling.detach().cpu().numpy(),
+        opacities=model.gs.get_opacity.detach().cpu().numpy().squeeze(-1),
+    )
+    training_config = checkpoint.get("training_config") or {}
+    active_count = active_gaussian_count_from_schedule(
+        total_count=len(geometry.xyz),
+        active_gaussian_schedule=training_config.get("active_gaussian_schedule"),
+        iteration=int(checkpoint["iteration"]),
+    )
+    active_geometry = select_active_geometry(geometry, active_count=active_count)
+    xyz = active_geometry.xyz
+    scales = active_geometry.scales
+    opacities = active_geometry.opacities
     mesh_vertices = _prepare_mesh_vertices(mesh_path)
-    geometry = ReconstructionGeometry(xyz=xyz, scales=scales, opacities=opacities)
-    metrics = evaluate_reconstruction(geometry, gt_mesh_path=mesh_path)
+    metrics = evaluate_reconstruction(active_geometry, gt_mesh_path=mesh_path)
     diagnostics = build_graph_diagnostics(xyz)
     metrics = {
         "checkpoint_path": str(checkpoint_path),
         "iteration": int(checkpoint["iteration"]),
+        "active_gaussians": int(len(xyz)),
         **metrics,
     }
 
