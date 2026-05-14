@@ -19,6 +19,7 @@ Results against the same ranking rule:
 - `component_count = 124`
 - `mst_p95 = 3.124618`
 - `line_score_mean = 0.688819`
+- structured metrics saved in `code/experiments/v15a_metrics_iter_1050.json`
 
 - `v15b` (`component_purity_weight = 0.05`) increased sampled training connectivity more aggressively, but did not beat `v15a` on the held-out graph diagnostics.
 - `v15c` (`component_purity_weight = 0.08`) pushed the sampled component fraction much higher during training, but degraded the final ranking metrics further.

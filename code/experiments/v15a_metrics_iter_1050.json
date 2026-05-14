@@ -1,0 +1,22 @@
+{
+  "checkpoint_path": "checkpoints/single_case_v15a/checkpoint_1050.pt",
+  "iteration": 1050,
+  "point_count": 12000,
+  "center": [
+    3.5313258171081543,
+    -2.229870319366455,
+    -3.516649007797241
+  ],
+  "std": [
+    10.9071683883667,
+    7.9949235916137695,
+    16.965347290039062
+  ],
+  "component_count": 124,
+  "largest_component_fraction": 0.712,
+  "neighbor_distance_mean": 1.8102634535895539,
+  "neighbor_distance_p95": 4.168091886076679,
+  "mst_mean": 1.1845673418484874,
+  "mst_p95": 3.124618382227856,
+  "line_score_mean": 0.6888194680213928
+}
