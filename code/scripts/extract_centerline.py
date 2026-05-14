@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from scipy.ndimage import distance_transform_edt, maximum_filter
+from skimage import measure
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -93,6 +94,28 @@ def _extract_centerline_points(
     return occupancy, points
 
 
+def _export_mesh(
+    output_path: Path,
+    occupancy: np.ndarray,
+    mins: np.ndarray,
+    maxs: np.ndarray,
+) -> None:
+    if not np.any(occupancy):
+        raise ValueError("Occupancy grid is empty; cannot export a mesh.")
+
+    verts, faces, _normals, _values = measure.marching_cubes(occupancy.astype(np.float32), level=0.5)
+    spacing = (maxs - mins) / np.maximum(np.array(occupancy.shape) - 1, 1)
+    verts_world = mins + verts.astype(np.float32) * spacing
+
+    try:
+        import trimesh
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError("trimesh is required to export reconstructed meshes.") from exc
+
+    mesh = trimesh.Trimesh(vertices=verts_world, faces=faces, process=False)
+    mesh.export(output_path)
+
+
 def _save_debug_image(output_path: Path, occupancy: np.ndarray, centerline_points: np.ndarray, mins: np.ndarray, maxs: np.ndarray) -> None:
     fig, axes = plt.subplots(1, 3, figsize=(14, 4), constrained_layout=True)
     mip_xy = occupancy.max(axis=2)
@@ -134,6 +157,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=Path("centerline_extraction"), help="Output directory.")
     parser.add_argument("--grid-size", type=int, default=96, help="Voxel grid size per axis.")
     parser.add_argument("--density-quantile", type=float, default=0.9, help="Density quantile for occupancy threshold.")
+    parser.add_argument("--export-mesh", action="store_true", help="Export an occupancy-derived mesh.")
     args = parser.parse_args()
 
     output_dir = args.output_dir
@@ -167,6 +191,10 @@ def main() -> None:
         mins,
         maxs,
     )
+    if args.export_mesh:
+        mesh_path = output_dir / f"reconstruction_iter_{checkpoint['iteration']}.stl"
+        _export_mesh(mesh_path, occupancy, mins, maxs)
+        print(f"Saved reconstructed mesh to {mesh_path}")
     npz_path = output_dir / f"centerline_iter_{checkpoint['iteration']}.npz"
     print(f"Saved {len(centerline_points):,} centerline candidate points to {npz_path}")
 
