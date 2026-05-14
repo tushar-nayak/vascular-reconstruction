@@ -447,7 +447,37 @@ def test_evaluate_current_reconstruction_applies_gate_and_score(tmp_path, monkey
 
     assert metrics["iteration"] == 75
     assert metrics["gate_pass"] is True
+    assert metrics["active_gaussians"] == 8
     assert metrics["score"] == [-0.61, 420.0, 150.0, 0.02, 2.75]
+
+
+def test_evaluate_current_reconstruction_uses_only_active_gaussians(tmp_path, monkeypatch):
+    trainer = _build_trainer(tmp_path, num_gaussians=8)
+    trainer.config.active_gaussian_schedule = [[0, 3], [10, 5]]
+
+    captured = {}
+
+    def fake_evaluate_reconstruction(geometry, **_kwargs):
+        captured["point_count"] = int(len(geometry.xyz))
+        return {
+            "largest_component_fraction": 0.52,
+            "component_count": 180,
+            "voxel_largest_component_fraction": 0.61,
+            "voxel_component_count": 420,
+            "occupancy_fill_ratio": 0.02,
+            "mesh_vertex_chamfer_p95": 150.0,
+            "mst_p95": 2.75,
+        }
+
+    monkeypatch.setattr(
+        "vascular_reconstruction.training.trainer.evaluate_reconstruction",
+        fake_evaluate_reconstruction,
+    )
+
+    metrics = trainer.evaluate_current_reconstruction(iteration=0)
+
+    assert captured["point_count"] == 3
+    assert metrics["active_gaussians"] == 3
 
 
 def test_maybe_run_eval_only_saves_improved_gate_checkpoint(tmp_path, monkeypatch):

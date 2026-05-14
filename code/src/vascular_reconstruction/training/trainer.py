@@ -892,10 +892,11 @@ class Trainer:
         return total_loss.item(), loss_image.item(), loss_physics.item(), loss_reg.item(), reg_stats
 
     def evaluate_current_reconstruction(self, iteration: int) -> dict[str, float | int | list[float] | bool]:
+        active_indices = self._active_gaussian_indices(iteration)
         geometry = ReconstructionGeometry(
-            xyz=self.model.gs.get_xyz.detach().cpu().numpy(),
-            scales=self.model.gs.get_scaling.detach().cpu().numpy(),
-            opacities=self.model.gs.get_opacity.detach().cpu().numpy().squeeze(-1),
+            xyz=self.model.gs.get_xyz[active_indices].detach().cpu().numpy(),
+            scales=self.model.gs.get_scaling[active_indices].detach().cpu().numpy(),
+            opacities=self.model.gs.get_opacity[active_indices].detach().cpu().numpy().squeeze(-1),
         )
         metrics = evaluate_reconstruction(
             geometry,
@@ -921,7 +922,14 @@ class Trainer:
             float(metrics["occupancy_fill_ratio"]),
             float(metrics["mst_p95"]),
         )
-        metrics.update({"iteration": iteration, "gate_pass": bool(gate_pass), "score": list(score)})
+        metrics.update(
+            {
+                "iteration": iteration,
+                "gate_pass": bool(gate_pass),
+                "score": list(score),
+                "active_gaussians": int(len(active_indices)),
+            }
+        )
         return metrics
 
     def _write_eval_metrics(self, metrics: Mapping[str, object]) -> None:
