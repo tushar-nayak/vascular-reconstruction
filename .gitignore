@@ -26,3 +26,10 @@ code/outputs/
 checkpoints/
 *.log
 visualization/*.png
+logs/
+centerline_extraction/
+visualization_current/
+visualization_refined/
+visualization_comparison/
+visualization_final/
+metrics/
