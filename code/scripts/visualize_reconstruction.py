@@ -194,7 +194,6 @@ def _plot_summary(ax, checkpoint: dict[str, object], metrics: dict[str, object])
 
 def _save_metrics(
     output_path: Path,
-    checkpoint_path: Path,
     metrics: dict[str, object],
 ) -> None:
     with output_path.open("w", encoding="utf-8") as f:
