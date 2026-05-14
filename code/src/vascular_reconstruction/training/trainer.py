@@ -5,9 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from math import ceil
 from pathlib import Path
+import json
 
 import numpy as np
 from PIL import Image
+from scipy.ndimage import binary_erosion, label
 from skimage.morphology import skeletonize
 import torch
 import torch.optim as optim
@@ -16,6 +18,7 @@ from tqdm import tqdm
 
 from vascular_reconstruction.config import ModelConfig, TrainingConfig
 from vascular_reconstruction.data.dataset import ProjectionDataset
+from vascular_reconstruction.evaluation.reconstruction_metrics import ReconstructionGeometry, evaluate_reconstruction
 from vascular_reconstruction.models.pinn_gs import PINN_GS
 from vascular_reconstruction.rendering import downsample_mask, render_gaussian_silhouette
 from vascular_reconstruction.simulation.equations import navier_stokes_loss
@@ -49,8 +52,10 @@ class Trainer:
         self.case_index = min(max(self.config.train_case_index, 0), len(self.dataset) - 1)
         self.case_data = self.dataset.get_case(self.case_index)
         self.case_id = str(self.case_data["case_id"])
+        self.gt_mesh_path = Path(self.case_data["mesh_path"]) if self.case_data.get("mesh_path") else None
         self._last_active_count = self.model_config.num_gaussians
         self._support_views = self._build_support_views()
+        self.best_eval_score = (float("inf"), float("inf"), float("inf"), float("inf"), float("inf"))
 
         self._initialize_gaussians_from_case(self.case_data)
 
@@ -586,12 +591,28 @@ class Trainer:
         self._last_active_count = target_count
 
     def _volume_thickness_loss(self, active_indices: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
+        occupancy_grid, spans = self._occupancy_grid(active_indices)
+        if occupancy_grid is None:
+            zero = torch.tensor(0.0, device=self.device)
+            return zero, {"volume_fill": 0.0, "volume_core_fill": 0.0}
+
+        occupancy_5d = occupancy_grid.unsqueeze(0).unsqueeze(0)
+        core_occupancy = -F.max_pool3d(-occupancy_5d, kernel_size=3, stride=1, padding=1)
+        volume_fill = occupancy_grid.mean()
+        core_fill = core_occupancy.mean()
+        loss = volume_fill + self.config.volume_core_weight * core_fill
+        return loss, {
+            "volume_fill": float(volume_fill.item()),
+            "volume_core_fill": float(core_fill.item()),
+            "volume_extent_mean": float((spans.mean()).item()),
+        }
+
+    def _occupancy_grid(self, active_indices: torch.Tensor) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         xyz = self.model.gs.get_xyz[active_indices]
         scaling = self.model.gs.get_scaling[active_indices]
         opacity = self.model.gs.get_opacity.squeeze(-1)[active_indices]
         if len(xyz) == 0:
-            zero = torch.tensor(0.0, device=self.device)
-            return zero, {"volume_fill": 0.0, "volume_core_fill": 0.0}
+            return None, None
 
         if len(xyz) > self.config.volume_sample_size:
             top_idx = torch.topk(opacity.detach(), k=self.config.volume_sample_size, largest=True).indices
@@ -628,16 +649,60 @@ class Trainer:
             self.config.volume_grid_size,
             self.config.volume_grid_size,
         )
-        occupancy_5d = occupancy_grid.unsqueeze(0).unsqueeze(0)
-        core_occupancy = -F.max_pool3d(-occupancy_5d, kernel_size=3, stride=1, padding=1)
+        return occupancy_grid, spans
 
-        volume_fill = occupancy_grid.mean()
-        core_fill = core_occupancy.mean()
-        loss = volume_fill + self.config.volume_core_weight * core_fill
+    def _voxel_topology_loss(self, active_indices: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
+        if self.config.voxel_topology_weight <= 0.0:
+            zero = torch.tensor(0.0, device=self.device)
+            return zero, {
+                "voxel_largest_component_fraction": 0.0,
+                "voxel_component_count": 0.0,
+                "occupancy_fill_ratio": 0.0,
+                "occupancy_compactness": 0.0,
+            }
+
+        occupancy_grid, _spans = self._occupancy_grid(active_indices)
+        if occupancy_grid is None:
+            zero = torch.tensor(0.0, device=self.device)
+            return zero, {
+                "voxel_largest_component_fraction": 0.0,
+                "voxel_component_count": 0.0,
+                "occupancy_fill_ratio": 0.0,
+                "occupancy_compactness": 0.0,
+            }
+
+        threshold = torch.quantile(occupancy_grid.detach().reshape(-1), self.config.voxel_density_quantile)
+        occupancy_mask_np = (occupancy_grid.detach().cpu().numpy() >= float(threshold.item()))
+        if not np.any(occupancy_mask_np):
+            fill_ratio = occupancy_grid.mean()
+            return fill_ratio, {
+                "voxel_largest_component_fraction": 0.0,
+                "voxel_component_count": 0.0,
+                "occupancy_fill_ratio": float(fill_ratio.item()),
+                "occupancy_compactness": 0.0,
+            }
+
+        labels, component_count = label(occupancy_mask_np)
+        component_sizes = np.bincount(labels.reshape(-1))[1:]
+        largest_label = int(np.argmax(component_sizes)) + 1
+        largest_component_mask = torch.from_numpy(labels == largest_label).to(self.device)
+        occupancy_mass = occupancy_grid.sum().clamp_min(1e-6)
+        outside_mass = occupancy_grid[~largest_component_mask].sum() / occupancy_mass
+
+        surface_mask = occupancy_mask_np & ~binary_erosion(occupancy_mask_np)
+        surface_count = max(int(surface_mask.sum()), 1)
+        largest_fraction = float(component_sizes.max() / max(int(occupancy_mask_np.sum()), 1))
+        compactness = float(component_sizes.max() / surface_count)
+        compactness_penalty = torch.tensor(max(0.0, 0.02 - compactness), device=self.device, dtype=occupancy_grid.dtype)
+        loss = (
+            self.config.voxel_connectivity_weight * outside_mass
+            + self.config.voxel_compactness_weight * compactness_penalty
+        )
         return loss, {
-            "volume_fill": float(volume_fill.item()),
-            "volume_core_fill": float(core_fill.item()),
-            "volume_extent_mean": float((spans.mean()).item()),
+            "voxel_largest_component_fraction": largest_fraction,
+            "voxel_component_count": float(component_count),
+            "occupancy_fill_ratio": float(occupancy_grid.mean().item()),
+            "occupancy_compactness": compactness,
         }
 
     def _geometry_regularization(self, iteration: int, active_indices: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
@@ -675,6 +740,7 @@ class Trainer:
 
         graph_connectivity, graph_stats = self._graph_connectivity_penalty(active_indices)
         component_purity, component_stats = self._component_purity_penalty(active_indices)
+        voxel_topology, voxel_stats = self._voxel_topology_loss(active_indices)
         point_support, point_support_stats = self._point_multiview_support_loss(active_indices)
 
         opacity_mean = opacity.mean()
@@ -689,6 +755,7 @@ class Trainer:
             + self.config.continuity_weight * continuity
             + self.config.graph_connectivity_weight * graph_connectivity
             + self.config.component_purity_weight * component_purity
+            + self.config.voxel_topology_weight * voxel_topology
             + self.config.line_structure_weight * line_structure
             + point_support
             + self.config.opacity_weight * opacity_reg
@@ -706,6 +773,10 @@ class Trainer:
             "sample_component_count": float(component_stats["sample_component_count"]),
             "sample_largest_component_fraction": float(component_stats["sample_largest_component_fraction"]),
             "outside_component_opacity_fraction": float(component_stats["outside_component_opacity_fraction"]),
+            "voxel_largest_component_fraction": float(voxel_stats["voxel_largest_component_fraction"]),
+            "voxel_component_count": float(voxel_stats["voxel_component_count"]),
+            "occupancy_fill_ratio": float(voxel_stats["occupancy_fill_ratio"]),
+            "occupancy_compactness": float(voxel_stats["occupancy_compactness"]),
             "line_structure": float(line_structure.item()),
             "point_vessel_support": float(point_support_stats["point_vessel_support"]),
             "point_skeleton_support": float(point_support_stats["point_skeleton_support"]),
@@ -820,6 +891,66 @@ class Trainer:
         reg_stats.update(volume_stats)
         return total_loss.item(), loss_image.item(), loss_physics.item(), loss_reg.item(), reg_stats
 
+    def evaluate_current_reconstruction(self, iteration: int) -> dict[str, float | int | list[float] | bool]:
+        geometry = ReconstructionGeometry(
+            xyz=self.model.gs.get_xyz.detach().cpu().numpy(),
+            scales=self.model.gs.get_scaling.detach().cpu().numpy(),
+            opacities=self.model.gs.get_opacity.detach().cpu().numpy().squeeze(-1),
+        )
+        metrics = evaluate_reconstruction(
+            geometry,
+            gt_mesh_path=self.gt_mesh_path,
+            voxel_grid_size=max(self.config.volume_grid_size * 4, 64),
+            density_quantile=self.config.voxel_density_quantile,
+        )
+        gate_pass = (
+            metrics["largest_component_fraction"] >= self.config.gate_min_graph_largest_component_fraction
+            and metrics["component_count"] <= self.config.gate_max_graph_component_count
+            and metrics["voxel_largest_component_fraction"] >= self.config.gate_min_voxel_largest_component_fraction
+            and metrics["voxel_component_count"] <= self.config.gate_max_voxel_component_count
+            and metrics["occupancy_fill_ratio"] <= self.config.gate_max_occupancy_fill_ratio
+            and (
+                self.config.gate_max_mesh_vertex_chamfer_p95 < 0.0
+                or metrics["mesh_vertex_chamfer_p95"] <= self.config.gate_max_mesh_vertex_chamfer_p95
+            )
+        )
+        score = (
+            -float(metrics["voxel_largest_component_fraction"]),
+            float(metrics["voxel_component_count"]),
+            float(metrics["mesh_vertex_chamfer_p95"]) if float(metrics["mesh_vertex_chamfer_p95"]) >= 0.0 else float("inf"),
+            float(metrics["occupancy_fill_ratio"]),
+            float(metrics["mst_p95"]),
+        )
+        metrics.update({"iteration": iteration, "gate_pass": bool(gate_pass), "score": list(score)})
+        return metrics
+
+    def _write_eval_metrics(self, metrics: Mapping[str, object]) -> None:
+        eval_dir = Path(self.config.log_dir) / "eval"
+        eval_dir.mkdir(parents=True, exist_ok=True)
+        path = eval_dir / f"iter_{int(metrics['iteration']):06d}.json"
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2)
+
+    def _maybe_run_eval(self, iteration: int) -> None:
+        if iteration <= 0 or iteration % self.config.eval_interval != 0:
+            return
+        metrics = self.evaluate_current_reconstruction(iteration)
+        self._write_eval_metrics(metrics)
+        gate_text = "PASS" if metrics["gate_pass"] else "FAIL"
+        print(
+            "Eval "
+            f"{gate_text} @ {iteration}: "
+            f"voxel_lcc={metrics['voxel_largest_component_fraction']:.3f}, "
+            f"voxel_cc={int(metrics['voxel_component_count'])}, "
+            f"fill={metrics['occupancy_fill_ratio']:.5f}, "
+            f"mesh_p95={metrics['mesh_vertex_chamfer_p95']:.3f}"
+        )
+        if metrics["gate_pass"]:
+            score_tuple = tuple(float(value) for value in metrics["score"])
+            if score_tuple < self.best_eval_score:
+                self.best_eval_score = score_tuple
+                self.save_checkpoint(iteration, filename="best_gate_checkpoint.pt", eval_metrics=metrics)
+
     def train(self) -> None:
         self.train_from_iteration(0)
 
@@ -869,13 +1000,19 @@ class Trainer:
                         f"Training aborted after {self.failure_count} consecutive failures."
                     ) from exc
 
+            self._maybe_run_eval(i)
             if i > 0 and i % self.config.save_interval == 0:
                 self.save_checkpoint(i)
 
         self.save_checkpoint(self.config.iterations)
 
-    def save_checkpoint(self, iteration: int) -> None:
-        path = Path(self.config.checkpoint_dir) / f"checkpoint_{iteration}.pt"
+    def save_checkpoint(
+        self,
+        iteration: int,
+        filename: str | None = None,
+        eval_metrics: Mapping[str, object] | None = None,
+    ) -> None:
+        path = Path(self.config.checkpoint_dir) / (filename or f"checkpoint_{iteration}.pt")
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
@@ -887,6 +1024,7 @@ class Trainer:
                 "pinn_optimizer_state_dict": self.pinn_optimizer.state_dict(),
                 "training_config": self.config.to_dict(),
                 "model_config": self.model_config.to_dict(),
+                "eval_metrics": dict(eval_metrics) if eval_metrics is not None else None,
             },
             path,
         )

@@ -76,6 +76,10 @@ class TrainingConfig(BaseConfig):
     component_knn: int = 6
     component_max_distance: float = 3.2
     component_sample_size: int = 128
+    voxel_topology_weight: float = 0.0
+    voxel_connectivity_weight: float = 0.7
+    voxel_compactness_weight: float = 0.3
+    voxel_density_quantile: float = 0.9
     line_structure_weight: float = 0.05
     line_structure_knn: int = 8
     point_support_weight: float = 0.0
@@ -97,6 +101,12 @@ class TrainingConfig(BaseConfig):
     debug_projection_interval: int = 1000
     device: str = "auto"
     max_failures: int = 5
+    gate_min_graph_largest_component_fraction: float = 0.0
+    gate_max_graph_component_count: int = 10_000
+    gate_min_voxel_largest_component_fraction: float = 0.0
+    gate_max_voxel_component_count: int = 10_000
+    gate_max_occupancy_fill_ratio: float = 1.0
+    gate_max_mesh_vertex_chamfer_p95: float = -1.0
     active_gaussian_schedule: list[list[int]] = field(default_factory=list)
     densify_opacity_scale: float = 0.85
     densify_scale_shrink: float = 0.7

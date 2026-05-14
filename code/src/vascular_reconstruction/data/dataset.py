@@ -39,6 +39,10 @@ class ProjectionDataset:
         self.case_ids = sorted(list(self.cases_dict.keys()))
         self.dt_cache = {} # Cache for distance transforms
         self.case_cache: dict[int, dict[str, Any]] = {}
+        self.mesh_roots = [
+            self.root_dir.parent / "meshes_split",
+            self.root_dir.parent / "meshes",
+        ]
         
     def __len__(self) -> int:
         return len(self.case_ids)
@@ -87,7 +91,15 @@ class ProjectionDataset:
         case_data = {
             "case_id": case_id,
             "views": views,
+            "mesh_path": self._resolve_mesh_path(case_id),
         }
         if self.cache_cases:
             self.case_cache[index] = case_data
         return case_data
+
+    def _resolve_mesh_path(self, case_id: str) -> str | None:
+        for mesh_root in self.mesh_roots:
+            candidate = mesh_root / f"{case_id}.stl"
+            if candidate.exists():
+                return str(candidate)
+        return None
