@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import torch
 
+from vascular_reconstruction.evaluation.reconstruction_metrics import gate_and_score_from_metrics
 from visualize_reconstruction import visualize_checkpoint
 
 
@@ -19,16 +20,11 @@ def _checkpoint_sort_key(path: Path) -> tuple[int, str]:
     return iteration, path.name
 
 
-def _rank_key(metrics: dict[str, object]) -> tuple[float, float, float, float]:
-    return (
-        -float(metrics["voxel_largest_component_fraction"]),
-        float(metrics["voxel_component_count"]),
-        float(metrics["mesh_vertex_chamfer_p95"]) if float(metrics["mesh_vertex_chamfer_p95"]) >= 0.0 else float("inf"),
-        -float(metrics["largest_component_fraction"]),
-        float(metrics["occupancy_fill_ratio"]),
-        float(metrics["mst_p95"]),
-        -float(metrics["line_score_mean"]),
-    )
+def _rank_key(metrics: dict[str, object]) -> tuple[float, ...]:
+    score = metrics.get("score")
+    if not isinstance(score, list):
+        score = gate_and_score_from_metrics(metrics).get("score", [])
+    return (0.0 if bool(metrics.get("gate_pass", True)) else 1.0, *(float(value) for value in score))
 
 
 def _resolve_mesh_path(case_id: str, mesh_root: Path) -> Path | None:
@@ -49,6 +45,7 @@ def _collect_metrics(checkpoint_dirs: list[Path], output_root: Path, mesh_root: 
                 mesh_path = _resolve_mesh_path(str(checkpoint["case_id"]), mesh_root)
             metrics = visualize_checkpoint(checkpoint_path, output_dir, mesh_path=mesh_path, save_figure=False)
             metrics["experiment"] = experiment_name
+            metrics.update(gate_and_score_from_metrics(metrics, training_config=checkpoint.get("training_config")))
             results.append(metrics)
     return results
 
@@ -57,13 +54,12 @@ def _write_summary(results: list[dict[str, object]], output_root: Path) -> Path:
     ranked = sorted(results, key=_rank_key)
     summary = {
         "ranking_rule": [
+            "gate_pass desc",
             "voxel_largest_component_fraction desc",
             "voxel_component_count asc",
             "mesh_vertex_chamfer_p95 asc",
-            "largest_component_fraction desc",
             "occupancy_fill_ratio asc",
             "mst_p95 asc",
-            "line_score_mean desc",
         ],
         "best_baseline": ranked[0] if ranked else None,
         "results": ranked,
@@ -115,12 +111,12 @@ def main() -> None:
         print(
             "Best baseline: "
             f"{best['experiment']} @ iter {best['iteration']} "
-            f"(voxel_largest_component_fraction={best['voxel_largest_component_fraction']:.3f}, "
+            f"(gate_pass={bool(best.get('gate_pass', True))}, "
+            f"voxel_largest_component_fraction={best['voxel_largest_component_fraction']:.3f}, "
             f"voxel_component_count={int(best['voxel_component_count'])}, "
             f"mesh_vertex_chamfer_p95={best['mesh_vertex_chamfer_p95']:.3f}, "
-            f"largest_component_fraction={best['largest_component_fraction']:.3f}, "
-            f"mst_p95={best['mst_p95']:.3f}, "
-            f"line_score_mean={best['line_score_mean']:.3f})"
+            f"occupancy_fill_ratio={best['occupancy_fill_ratio']:.5f}, "
+            f"mst_p95={best['mst_p95']:.3f})"
         )
 
 

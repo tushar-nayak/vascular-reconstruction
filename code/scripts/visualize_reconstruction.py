@@ -25,6 +25,7 @@ from vascular_reconstruction.evaluation.reconstruction_metrics import (
     active_gaussian_count_from_schedule,
     build_graph_diagnostics,
     evaluate_reconstruction,
+    gate_and_score_from_metrics,
     select_active_geometry,
     sample_points,
 )
@@ -184,6 +185,9 @@ def _plot_summary(ax, checkpoint: dict[str, object], metrics: dict[str, object])
         f"MST p95 edge: {metrics['mst_p95']:.3f}",
         f"Mean line score: {metrics['line_score_mean']:.3f}",
         "",
+        f"Gate pass: {bool(metrics.get('gate_pass', False))}",
+        f"Active Gaussians: {int(metrics.get('active_gaussians', metrics['point_count'])):,}",
+        "",
         f"Voxel components: {int(metrics['voxel_component_count'])}",
         f"Voxel largest frac: {metrics['voxel_largest_component_fraction']:.3f}",
         f"Occupancy fill: {metrics['occupancy_fill_ratio']:.5f}",
@@ -228,10 +232,9 @@ def visualize_checkpoint(
     )
     active_geometry = select_active_geometry(geometry, active_count=active_count)
     xyz = active_geometry.xyz
-    scales = active_geometry.scales
-    opacities = active_geometry.opacities
     mesh_vertices = _prepare_mesh_vertices(mesh_path)
     metrics = evaluate_reconstruction(active_geometry, gt_mesh_path=mesh_path)
+    metrics.update(gate_and_score_from_metrics(metrics, training_config=training_config))
     diagnostics = build_graph_diagnostics(xyz)
     metrics = {
         "checkpoint_path": str(checkpoint_path),

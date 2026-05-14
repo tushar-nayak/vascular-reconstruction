@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 import struct
@@ -50,6 +51,32 @@ def select_active_geometry(
         scales=geometry.scales[active_indices],
         opacities=geometry.opacities[active_indices],
     )
+
+
+def gate_and_score_from_metrics(
+    metrics: Mapping[str, object],
+    training_config: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    config = training_config or {}
+    gate_pass = (
+        float(metrics["largest_component_fraction"]) >= float(config.get("gate_min_graph_largest_component_fraction", 0.0))
+        and float(metrics["component_count"]) <= float(config.get("gate_max_graph_component_count", 10_000))
+        and float(metrics["voxel_largest_component_fraction"]) >= float(config.get("gate_min_voxel_largest_component_fraction", 0.0))
+        and float(metrics["voxel_component_count"]) <= float(config.get("gate_max_voxel_component_count", 10_000))
+        and float(metrics["occupancy_fill_ratio"]) <= float(config.get("gate_max_occupancy_fill_ratio", 1.0))
+        and (
+            float(config.get("gate_max_mesh_vertex_chamfer_p95", -1.0)) < 0.0
+            or float(metrics["mesh_vertex_chamfer_p95"]) <= float(config.get("gate_max_mesh_vertex_chamfer_p95", -1.0))
+        )
+    )
+    score = (
+        -float(metrics["voxel_largest_component_fraction"]),
+        float(metrics["voxel_component_count"]),
+        float(metrics["mesh_vertex_chamfer_p95"]) if float(metrics["mesh_vertex_chamfer_p95"]) >= 0.0 else float("inf"),
+        float(metrics["occupancy_fill_ratio"]),
+        float(metrics["mst_p95"]),
+    )
+    return {"gate_pass": bool(gate_pass), "score": list(score)}
 
 
 def sample_points(points: np.ndarray, max_points: int, seed: int) -> np.ndarray:

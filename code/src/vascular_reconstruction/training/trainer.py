@@ -22,6 +22,7 @@ from vascular_reconstruction.evaluation.reconstruction_metrics import (
     ReconstructionGeometry,
     active_gaussian_count_from_schedule,
     evaluate_reconstruction,
+    gate_and_score_from_metrics,
     select_active_geometry,
 )
 from vascular_reconstruction.models.pinn_gs import PINN_GS
@@ -909,30 +910,12 @@ class Trainer:
             voxel_grid_size=max(self.config.volume_grid_size * 4, 64),
             density_quantile=self.config.voxel_density_quantile,
         )
-        gate_pass = (
-            metrics["largest_component_fraction"] >= self.config.gate_min_graph_largest_component_fraction
-            and metrics["component_count"] <= self.config.gate_max_graph_component_count
-            and metrics["voxel_largest_component_fraction"] >= self.config.gate_min_voxel_largest_component_fraction
-            and metrics["voxel_component_count"] <= self.config.gate_max_voxel_component_count
-            and metrics["occupancy_fill_ratio"] <= self.config.gate_max_occupancy_fill_ratio
-            and (
-                self.config.gate_max_mesh_vertex_chamfer_p95 < 0.0
-                or metrics["mesh_vertex_chamfer_p95"] <= self.config.gate_max_mesh_vertex_chamfer_p95
-            )
-        )
-        score = (
-            -float(metrics["voxel_largest_component_fraction"]),
-            float(metrics["voxel_component_count"]),
-            float(metrics["mesh_vertex_chamfer_p95"]) if float(metrics["mesh_vertex_chamfer_p95"]) >= 0.0 else float("inf"),
-            float(metrics["occupancy_fill_ratio"]),
-            float(metrics["mst_p95"]),
-        )
+        gate_and_score = gate_and_score_from_metrics(metrics, training_config=self.config.to_dict())
         metrics.update(
             {
                 "iteration": iteration,
-                "gate_pass": bool(gate_pass),
-                "score": list(score),
                 "active_gaussians": int(len(active_geometry.xyz)),
+                **gate_and_score,
             }
         )
         return metrics

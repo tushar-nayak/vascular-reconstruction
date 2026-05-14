@@ -5,6 +5,7 @@ import numpy as np
 from vascular_reconstruction.evaluation.reconstruction_metrics import (
     ReconstructionGeometry,
     active_gaussian_count_from_schedule,
+    gate_and_score_from_metrics,
     select_active_geometry,
 )
 
@@ -39,3 +40,28 @@ def test_select_active_geometry_keeps_highest_opacity_subset():
         (1.0, 0.0, 0.0),
         (3.0, 0.0, 0.0),
     }
+
+
+def test_gate_and_score_from_metrics_applies_thresholds():
+    metrics = {
+        "largest_component_fraction": 0.52,
+        "component_count": 180,
+        "voxel_largest_component_fraction": 0.61,
+        "voxel_component_count": 420,
+        "occupancy_fill_ratio": 0.02,
+        "mesh_vertex_chamfer_p95": 150.0,
+        "mst_p95": 2.75,
+    }
+    training_config = {
+        "gate_min_graph_largest_component_fraction": 0.45,
+        "gate_max_graph_component_count": 300,
+        "gate_min_voxel_largest_component_fraction": 0.45,
+        "gate_max_voxel_component_count": 900,
+        "gate_max_occupancy_fill_ratio": 0.03,
+        "gate_max_mesh_vertex_chamfer_p95": 180.0,
+    }
+
+    result = gate_and_score_from_metrics(metrics, training_config=training_config)
+
+    assert result["gate_pass"] is True
+    assert result["score"] == [-0.61, 420.0, 150.0, 0.02, 2.75]
