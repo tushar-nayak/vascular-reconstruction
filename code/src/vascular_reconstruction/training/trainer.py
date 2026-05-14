@@ -281,6 +281,76 @@ class Trainer:
             "mst_edges": mst_edges,
         }
 
+    def _component_purity_penalty(self, active_indices: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
+        if len(active_indices) <= 1 or self.config.component_purity_weight <= 0.0:
+            zero = torch.tensor(0.0, device=self.device)
+            return zero, {
+                "sample_component_count": 0.0,
+                "sample_largest_component_fraction": 0.0,
+                "outside_component_opacity_fraction": 0.0,
+            }
+
+        sample_size = min(len(active_indices), self.config.component_sample_size)
+        opacity = self.model.gs.get_opacity.squeeze(-1)[active_indices]
+        sample_local = torch.topk(opacity.detach(), k=sample_size, largest=True).indices
+        sampled_indices = active_indices[sample_local]
+        sampled_xyz = self.model.gs.get_xyz[sampled_indices]
+        sampled_opacity = self.model.gs.get_opacity.squeeze(-1)[sampled_indices]
+
+        pairwise_dist = torch.cdist(sampled_xyz, sampled_xyz)
+        knn_k = min(self.config.component_knn + 1, len(sampled_xyz))
+        if knn_k <= 1:
+            zero = torch.tensor(0.0, device=self.device)
+            return zero, {
+                "sample_component_count": 1.0,
+                "sample_largest_component_fraction": 1.0,
+                "outside_component_opacity_fraction": 0.0,
+            }
+
+        knn_indices = torch.topk(pairwise_dist, k=knn_k, largest=False).indices[:, 1:]
+        knn_distances = torch.topk(pairwise_dist, k=knn_k, largest=False).values[:, 1:]
+        adjacency = torch.zeros((len(sampled_xyz), len(sampled_xyz)), dtype=torch.bool, device=self.device)
+        neighbor_mask = knn_distances <= self.config.component_max_distance
+        rows = torch.arange(len(sampled_xyz), device=self.device).unsqueeze(1).expand_as(knn_indices)
+        adjacency[rows[neighbor_mask], knn_indices[neighbor_mask]] = True
+        adjacency = adjacency | adjacency.T
+
+        visited = torch.zeros(len(sampled_xyz), dtype=torch.bool, device=self.device)
+        labels = torch.full((len(sampled_xyz),), -1, dtype=torch.long, device=self.device)
+        component_sizes: list[int] = []
+        component_id = 0
+
+        for start in range(len(sampled_xyz)):
+            if visited[start]:
+                continue
+            stack = [start]
+            visited[start] = True
+            labels[start] = component_id
+            size = 0
+            while stack:
+                current = stack.pop()
+                size += 1
+                neighbors = torch.nonzero(adjacency[current], as_tuple=False).squeeze(-1)
+                for neighbor in neighbors.tolist():
+                    if visited[neighbor]:
+                        continue
+                    visited[neighbor] = True
+                    labels[neighbor] = component_id
+                    stack.append(neighbor)
+            component_sizes.append(size)
+            component_id += 1
+
+        largest_component = int(np.argmax(component_sizes))
+        largest_mask = labels == largest_component
+        outside_mask = ~largest_mask
+        opacity_mass = sampled_opacity.sum().clamp_min(1e-6)
+        outside_opacity_fraction = sampled_opacity[outside_mask].sum() / opacity_mass
+        return outside_opacity_fraction, {
+            "sample_component_count": float(len(component_sizes)),
+            "sample_largest_component_fraction": float(component_sizes[largest_component] / len(sampled_xyz)),
+            "outside_component_opacity_fraction": float(outside_opacity_fraction.item()),
+        }
+
     def _sample_projected_map(
         self,
         points: torch.Tensor,
@@ -604,6 +674,7 @@ class Trainer:
             line_structure = (transverse_energy / total_energy).mean()
 
         graph_connectivity, graph_stats = self._graph_connectivity_penalty(active_indices)
+        component_purity, component_stats = self._component_purity_penalty(active_indices)
         point_support, point_support_stats = self._point_multiview_support_loss(active_indices)
 
         opacity_mean = opacity.mean()
@@ -617,6 +688,7 @@ class Trainer:
             + self.config.std_floor_weight * std_floor
             + self.config.continuity_weight * continuity
             + self.config.graph_connectivity_weight * graph_connectivity
+            + self.config.component_purity_weight * component_purity
             + self.config.line_structure_weight * line_structure
             + point_support
             + self.config.opacity_weight * opacity_reg
@@ -631,6 +703,9 @@ class Trainer:
             "graph_edge_mean": float(graph_stats["graph_edge_mean"]),
             "graph_edge_p90": float(graph_stats["graph_edge_p90"]),
             "graph_bridge_mean": float(graph_stats["graph_bridge_mean"]),
+            "sample_component_count": float(component_stats["sample_component_count"]),
+            "sample_largest_component_fraction": float(component_stats["sample_largest_component_fraction"]),
+            "outside_component_opacity_fraction": float(component_stats["outside_component_opacity_fraction"]),
             "line_structure": float(line_structure.item()),
             "point_vessel_support": float(point_support_stats["point_vessel_support"]),
             "point_skeleton_support": float(point_support_stats["point_skeleton_support"]),
@@ -782,7 +857,9 @@ class Trainer:
                         "Loss: "
                         f"{loss:.4f} | Sil: {l_img:.4f} | Skel: {reg_stats['skeleton_loss']:.4f} "
                         f"| Vol: {reg_stats['volume_core_fill']:.4f} | Phys: {l_phys:.4f} | Reg: {l_reg:.4f} "
-                        f"| Active: {int(reg_stats['active_gaussians'])} | XYZstd: {reg_stats['xyz_std_mean']:.2f}"
+                        f"| Active: {int(reg_stats['active_gaussians'])} "
+                        f"| CompFrac: {reg_stats['sample_largest_component_fraction']:.2f} "
+                        f"| XYZstd: {reg_stats['xyz_std_mean']:.2f}"
                     )
             except Exception as exc:
                 self.failure_count += 1

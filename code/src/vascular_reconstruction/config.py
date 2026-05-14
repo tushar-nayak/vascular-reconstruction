@@ -72,6 +72,10 @@ class TrainingConfig(BaseConfig):
     graph_sample_size: int = 192
     graph_edge_target: float = 2.5
     graph_bridge_edges: int = 8
+    component_purity_weight: float = 0.0
+    component_knn: int = 6
+    component_max_distance: float = 3.2
+    component_sample_size: int = 128
     line_structure_weight: float = 0.05
     line_structure_knn: int = 8
     point_support_weight: float = 0.0
