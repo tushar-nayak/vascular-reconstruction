@@ -1,6 +1,6 @@
 # Vascular Reconstruction
 
-This repository is an experiment in reconstructing 3D coronary vessel geometry from a small set of 2D angiographic views.
+> Note: This repository is a separate exploratory extension of my FluoroGRID thesis work. FluoroGRID targets sparse 3D neuro-vascular deformation estimation from fluoroscopy leading to deformable registration, while this repo explores a newer mesh-free angiographic reconstruction formulation that is still under active development. This repository is an experiment in reconstructing 3D coronary vessel geometry from a small set of 2D angiographic views.
 
 The project has two main parts:
 
